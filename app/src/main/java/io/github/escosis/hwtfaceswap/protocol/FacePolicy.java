@@ -1,0 +1,80 @@
+package io.github.escosis.hwtfaceswap.protocol;
+
+import java.util.List;
+
+/**
+ * 基于已观察到的 27/02 字段制定界面与选择策略，不据此判定安装结果或许可状态。
+ * 原始条目 05 是位集合；原始条目 07 是枚举，在已读取的原生映射中范围为 0..5。
+ * WatchFaceType.STICKER.value()==9 属于业务枚举，绝不等同于原始 type==9 或 tag0A==9。
+ */
+public final class FacePolicy {
+    public static final long CURRENT=0x01L, PRESET=0x02L, SUPPORT_DELETE=0x04L, EDITABLE=0x08L;
+    public static final long VIDEO=0x10L, PHOTO=0x20L, TRIAL=0x40L, KALEIDOSCOPE=0x80L;
+    public static final long EXPAND_VIDEO=1L, EXPAND_PHOTO=2L, EXPAND_KALEIDOSCOPE=3L;
+    public static final long EXPAND_WEAR=4L, EXPAND_STICKER=5L;
+    private static final long KNOWN_RAW_BITS=0xffL;
+    private static final long INELIGIBLE_BITS=PRESET|VIDEO|PHOTO|TRIAL|KALEIDOSCOPE;
+    private FacePolicy() {}
+
+    private static boolean typeObserved(TlvView.Face face) {
+        return face!=null && face.type!=null && face.type.longValue()>=0 && face.type.longValue()<=0xffffffffL;
+    }
+    private static boolean has(TlvView.Face face,long bit) {
+        return typeObserved(face) && (face.type.longValue()&bit)!=0;
+    }
+    private static boolean expand(TlvView.Face face,long value) {
+        return face!=null && face.expandType!=null && face.expandType.longValue()==value;
+    }
+
+    /** 即使条目受保护、属于特殊类型或不可选择，也按实际当前位标记。 */
+    public static boolean current(TlvView.Face face) { return has(face,CURRENT); }
+
+    /**
+     * 仅选择已有的、非预置且可删除的普通表盘；不根据缺失或未知的 expand 枚举
+     * 推断为普通表盘，贴纸仅由 expand==5 识别。
+     * 未知原始高位、试用及其他特殊配置路径均禁用。
+     * 这不代表预置、试用或未知条目在所有固件上都无法替换。
+     */
+    public static boolean eligible(TlvView.Face face) {
+        if(!typeObserved(face) || !face.validResource())return false;
+        long type=face.type.longValue();
+        if((type&~KNOWN_RAW_BITS)!=0 || (type&SUPPORT_DELETE)==0 || (type&INELIGIBLE_BITS)!=0)return false;
+        return face.expandType!=null && face.expandType.longValue()==0;
+    }
+
+    /**
+     * 仅提供类型标签，不编造表盘名称。特殊类型的优先级遵循原生
+     * WatchFaceWearService.getWatchType(II)：视频、相册、万花筒、穿戴，然后是贴纸。
+     */
+    public static String kind(TlvView.Face face) {
+        if(face==null)return "类型未确认";
+        String special=null;
+        if(has(face,VIDEO)||expand(face,EXPAND_VIDEO))special="视频表盘";
+        if(has(face,PHOTO)||expand(face,EXPAND_PHOTO))special="相册表盘";
+        if(has(face,KALEIDOSCOPE)||expand(face,EXPAND_KALEIDOSCOPE))special="万花筒表盘";
+        if(expand(face,EXPAND_WEAR))special="穿戴表盘";
+        if(expand(face,EXPAND_STICKER))special="趣味贴纸";
+        if(special!=null)return special;
+        if(!typeObserved(face) || (face.type.longValue()&~KNOWN_RAW_BITS)!=0)return "类型未确认";
+        if(face.expandType==null || face.expandType.longValue()!=0)return "扩展类型未确认";
+        if(has(face,TRIAL))return "试用表盘";
+        if(has(face,PRESET))return "预置表盘";
+        if(!has(face,SUPPORT_DELETE))return "不可删除普通表盘";
+        return "普通表盘";
+    }
+
+    /**
+     * 仅当实际观察到唯一当前条目，且该条目本身可操作时，才将其作为默认选择。
+     * 当前条目为特殊或不支持的类型时，绝不默默改选其他条目。
+     * 返回原始 Face 对象，以便调用方绑定 ID、版本及对应观察。
+     */
+    public static TlvView.Face defaultSelection(List<TlvView.Face> faces) {
+        if(faces==null || faces.size()>TlvView.MAX_FIELDS)return null;
+        TlvView.Face selected=null;
+        for(TlvView.Face face:faces)if(current(face)){
+            if(selected!=null)return null;
+            selected=face;
+        }
+        return selected!=null && eligible(selected)?selected:null;
+    }
+}
