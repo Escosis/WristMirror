@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -283,19 +284,22 @@ fun WanJingApp(
             state.pendingUpdate?.takeIf {
                 !detailsVisible && !overlayExpandedOnSettings && !deviceWindowExpanded && !introductionHostPresent && UiPolicy.showUpdate(state)
             }?.let { info ->
-                UpdateDialog(
-                    info = info,
-                    currentVersion = state.appVersion,
-                    onDismiss = {
-                        if(updateCallbackCurrent(info)) actions.dismissUpdate()
-                    },
-                    onOpenReleasePage = {
-                        if(updateCallbackCurrent(info)) {
-                            actions.dismissUpdate()
-                            openProjectPage(context, info.releaseUrl.ifBlank { info.downloadUrl })
-                        }
-                    },
-                )
+                key(info) {
+                    UpdateDialog(
+                        info = info,
+                        currentVersion = state.appVersion,
+                        isCurrent = { updateCallbackCurrent(info) },
+                        onDismiss = {
+                            if(updateCallbackCurrent(info)) actions.dismissUpdate()
+                        },
+                        onOpenReleasePage = {
+                            if(updateCallbackCurrent(info)) {
+                                actions.dismissUpdate()
+                                openProjectPage(context, info.releaseUrl.ifBlank { info.downloadUrl })
+                            }
+                        },
+                    )
+                }
             }
         }
     }
@@ -304,17 +308,8 @@ fun WanJingApp(
 internal fun openProjectPage(context: Context, url: String) {
     if(url.isBlank()) return
     try {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        val browser = context.packageManager.queryIntentActivities(intent, 0).firstOrNull {
-            val pkg = it.activityInfo.packageName
-            pkg != "com.github.android" && !pkg.contains("github", ignoreCase = true)
-        }
-        if(browser != null) intent.setPackage(browser.activityInfo.packageName)
-        context.startActivity(intent)
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     } catch(_: Exception) {
-        Toast.makeText(context, "打开链接失败，请检查浏览器", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "打开链接失败", Toast.LENGTH_SHORT).show()
     }
 }

@@ -34,9 +34,9 @@ import top.yukonga.miuix.kmp.utils.RemovePlatformDialogDefaultEffects
 import top.yukonga.miuix.kmp.utils.platformDialogProperties
 
 /**
- * 仅首次说明使用的居中宿主；Miuix 0.9.3 WindowDialog没有居中参数，小屏默认底部。
+ * 与首次说明共用的居中宿主；Miuix 0.9.3 WindowDialog没有居中参数，小屏默认底部。
  * 使用真实原生Dialog、Miuix主题/卡片与有界内容，不伪造屏幕断点或平移底部命中区域。
- * 动画结束只报告hide完成，实际native child disposal仍由原说明owner收据核对。
+ * 动画结束只报告hide完成，实际native child disposal由调用方的owner收据核对。
  */
 @Composable
 internal fun CenteredIntroductionHost(
