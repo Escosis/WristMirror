@@ -203,7 +203,7 @@ internal fun HuaweiIdDialog(
             HuaweiIdDeviceCard(presentation.name, presentation.address)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "这台设备的内部 ID",
+                    "这台设备的华为 ID",
                     modifier = Modifier.weight(1f),
                     style = MiuixTheme.textStyles.body1,
                     fontWeight = FontWeight.Medium,
@@ -221,7 +221,7 @@ internal fun HuaweiIdDialog(
             MiuixField(
                 value = presentedValue,
                 onValueChange = { if (isCurrent() && canEdit) onValueChange(it) },
-                label = "输入内部华为 ID",
+                label = "输入华为 ID",
                 enabled = presentation.canEdit,
                 keyboardType = KeyboardType.Password,
                 visualTransformation = if (visiblyRevealed) VisualTransformation.None else PasswordVisualTransformation(),
@@ -240,7 +240,7 @@ internal fun HuaweiIdDialog(
             )
             MutedText(
                 if (presentation.connected) "修改后保存，下次连接时生效。"
-                else "为这台设备填写与运动健康或腕连一致的内部华为 ID。",
+                else "为这台设备填写与运动健康一致的华为 ID。",
             )
             if (presentation.feedback.isNotBlank()) MutedText(presentation.feedback)
             if (!presentation.connected) {

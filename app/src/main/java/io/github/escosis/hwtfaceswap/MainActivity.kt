@@ -18,7 +18,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import io.github.escosis.hwtfaceswap.ui.WanJingApp
@@ -26,6 +31,7 @@ import io.github.escosis.hwtfaceswap.ui.WanJingApp
 /** 系统界面边界；设备、账户和协议行为由界面模型与运行时处理。 */
 class MainActivity : ComponentActivity() {
     private val watchViewModel by viewModels<WatchViewModel>()
+    private val introductionStartupCompletion = IntroductionStartupCompletion(this)
     private var platformMessage by mutableStateOf("")
     private var pendingBluetoothAction: BluetoothAction? = null
     private var pendingNotificationAction: BluetoothAction? = null
@@ -128,7 +134,19 @@ class MainActivity : ComponentActivity() {
                 onConnect = { device, internalId -> connectWithPermissions(device, internalId) },
                 onPickHwt = ::pickHwt,
                 onExportLogs = ::exportLogs,
+                onIntroductionDismissed = {
+                    if(!isFinishing && !isDestroyed && introductionStartupCompletion.recordRetired(this,
+                            acknowledged = !watchViewModel.state.value.introductionPending, current = watchViewModel.state.value)) {
+                        consumeIntroductionStartupCompletion()
+                    }
+                },
             )
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                // PAUSED 时完成的说明退场，返回前台后复核当前状态；无收据时不会在 onResume 重连。
+                watchViewModel.state.collect { consumeIntroductionStartupCompletion() }
+            }
         }
         connectAtStartup()
         watchViewModel.checkUpdatesAtStartup()
@@ -138,6 +156,11 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // 设置页返回不是成功证据：重新经过当前适配器/权限/MAC 的真实 bond-state 读取。
         watchViewModel.verifyUnpairAfterSettings()
+    }
+
+    private fun consumeIntroductionStartupCompletion() {
+        val visible = !isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        if(introductionStartupCompletion.take(this, visible, watchViewModel.state.value)) connectAtStartup()
     }
 
     private fun connectAtStartup() {
@@ -157,7 +180,7 @@ class MainActivity : ComponentActivity() {
         ) return
         val isValid = {
             val current = watchViewModel.state.value
-            (!automatic || current.autoConnect) && current.selectedDeviceAddress == device.address &&
+            !current.introductionPending && (!automatic || current.autoConnect) && current.selectedDeviceAddress == device.address &&
                 current.connectionFormRevision == revision && watchViewModel.platformActionRevisionIsCurrent(revision) &&
                 !UiPolicy.isUnpairTarget(current, device.address) && current.huaweiIdInput == draft &&
                 current.connectionEpoch == epoch && watchViewModel.connectionEpochIsCurrent(epoch) &&
@@ -173,7 +196,7 @@ class MainActivity : ComponentActivity() {
         val revision = watchViewModel.state.value.connectionFormRevision
         val isValid = {
             val current = watchViewModel.state.value
-            watchViewModel.platformActionRevisionIsCurrent(revision) &&
+            !current.introductionPending && watchViewModel.platformActionRevisionIsCurrent(revision) &&
                 !current.connected && !current.connecting && !current.operation.active &&
                 current.prompt == null && !current.needsPin
         }

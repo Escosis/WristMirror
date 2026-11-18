@@ -13,6 +13,8 @@ public final class Wire {
     /** TLV 最多 64 KiB，加上原生服务与命令字节后仍小于 65 KiB。 */
     public static final int MAX_NATIVE_PACKET_BYTES = TlvView.MAX_BYTES + 2;
     private static final int MAX_TEXT_BYTES = 32;
+    // 单容器的字段上限不等于多条目列表的累计上限；累计节点仍有独立硬预算。
+    private static final int MAX_TOTAL_FACE_FIELDS = 4096;
 
     private Wire() {}
 
@@ -155,7 +157,7 @@ public final class Wire {
     }
 
     private static final class Budget {
-        private int nodesLeft = TlvView.MAX_FIELDS;
+        private int nodesLeft = MAX_TOTAL_FACE_FIELDS;
         // 只处理已知的三层；此总处理上限也限制所有解码值副本的规模。
         private int bytesLeft = TlvView.MAX_BYTES * TlvView.MAX_DEPTH;
 

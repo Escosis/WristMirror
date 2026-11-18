@@ -12,15 +12,15 @@ class ReplacementProgressDialogPolicyTest {
         ReplacementDialogInfo(11L, 7L, "777", "1.0.1", "Synthetic face", "synthetic.hwt",
             OperationInfo("replacement", stage, stage, 100, active, failed))
 
-    @Test fun replacementNeverRendersThePageCardButOtherOperationsStillDo() {
+    @Test fun replacementAndDeletionNeverRenderPageCardsButSourcePreparationStillDoes() {
         for (stage in listOf("WAIT_OPERATION", "TRANSFERRING", "WAIT_POST", "WAIT_LIST", "LISTED", "NO_TRANSFER", "FAILED", "CANCELLED")) {
             assertFalse(pageOperationCardVisible(info(stage).operation))
             assertFalse(pageOperationCardVisible(info(stage, false, true).operation))
         }
         assertFalse(pageOperationCardVisible(OperationInfo()))
         assertTrue(pageOperationCardVisible(OperationInfo("source", "PREPARING", active = true)))
-        assertTrue(pageOperationCardVisible(OperationInfo("deletion", "DELETED")))
-        assertTrue(pageOperationCardVisible(OperationInfo("deletion", "FAILED", failed = true)))
+        assertFalse(pageOperationCardVisible(OperationInfo("deletion", "DELETED")))
+        assertFalse(pageOperationCardVisible(OperationInfo("deletion", "FAILED", failed = true)))
     }
 
     @Test fun deviceWindowsCannotOverlayActiveOrTerminalReplacementDialog() {

@@ -55,8 +55,8 @@ internal suspend fun runDeviceWindowHandoffExit(
 internal fun String.isSelectedIn(state: AppUiState): Boolean = equals(state.selectedDeviceAddress, ignoreCase = true)
 
 internal fun canShowDeviceWindow(state: AppUiState): Boolean =
-    !state.unpairWorking && !state.connecting && !state.operation.active && !state.pickingHwt &&
-        state.replacementDialog == null && state.prompt == null && !state.needsPin
+    !state.introductionPending && !state.unpairWorking && !state.connecting && !state.operation.active && !state.pickingHwt &&
+        state.operationDialog == null && state.prompt == null && !state.needsPin
 
 internal fun canSelectWatch(state: AppUiState): Boolean = !state.connected && canShowDeviceWindow(state)
 

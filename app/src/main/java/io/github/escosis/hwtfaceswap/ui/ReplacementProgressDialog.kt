@@ -38,17 +38,34 @@ import top.yukonga.miuix.kmp.layout.DialogDefaults
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal fun pageOperationCardVisible(operation: OperationInfo): Boolean =
-    operation.kind != "replacement" && (operation.active || operation.failed || operation.stage.isNotBlank())
+    operation.kind != "replacement" && operation.kind != "deletion" &&
+        (operation.active || operation.failed || operation.stage.isNotBlank())
 
 internal fun replacementDialogSameOwner(rendered: ReplacementDialogInfo, current: ReplacementDialogInfo?): Boolean =
-    current != null && rendered.token == current.token && rendered.connectionEpoch == current.connectionEpoch &&
+    current != null && rendered.operation.kind == current.operation.kind &&
+        rendered.token == current.token && rendered.connectionEpoch == current.connectionEpoch &&
         rendered.targetId == current.targetId && rendered.targetVersion == current.targetVersion
 
 internal fun replacementDialogCanDismiss(ownerAlive: Boolean, rendered: ReplacementDialogInfo, current: ReplacementDialogInfo?): Boolean =
     ownerAlive && replacementDialogSameOwner(rendered, current) && current?.operation?.active == false
 
 internal fun replacementDialogSucceeded(info: ReplacementDialogInfo): Boolean =
-    info.operation.stage == "LISTED" && !info.operation.active && !info.operation.failed
+    !info.operation.active && !info.operation.failed && when (info.operation.kind) {
+        "replacement" -> info.operation.stage == "LISTED"
+        "deletion" -> info.operation.stage == "DELETED"
+        else -> false
+    }
+
+internal fun operationDialogTitle(info: ReplacementDialogInfo): String =
+    if (info.operation.kind == "deletion") "删除表盘" else "替换表盘"
+
+internal fun operationDialogStatusText(info: ReplacementDialogInfo): String = when {
+    replacementDialogSucceeded(info) -> if (info.operation.kind == "deletion") "表盘已删除" else "表盘已替换"
+    info.operation.stage == "CANCELLED" -> if (info.operation.kind == "deletion") "删除已取消" else "替换已取消"
+    else -> info.operation.detail.ifBlank { info.operation.stage.ifBlank {
+        if (info.operation.kind == "deletion") "等待删除状态" else "等待替换状态"
+    } }
+}
 
 internal fun replacementDialogProperties(info: ReplacementDialogInfo): DialogProperties = DialogProperties(
     dismissOnBackPress = !info.operation.active,
@@ -61,15 +78,16 @@ internal fun ReplacementProgressDialog(state: AppUiState, actions: AppActions) {
     // 共享最新快照必须先于 keyed/early-return 分支：旧 key 退休前也要看见新任务或高优先级窗口。
     val latestState by rememberUpdatedState(state)
     val latestActions by rememberUpdatedState(actions)
-    val info = state.replacementDialog ?: return
+    val info = state.operationDialog ?: return
     if (state.prompt != null || state.needsPin) return
-    key(info.token) {
+    key(info.operation.kind, info.token) {
         val owner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
         DisposableEffect(owner) { onDispose { owner.set(false) } }
         fun dismiss() {
             val current = latestState
-            if (current.prompt == null && !current.needsPin && replacementDialogCanDismiss(owner.get(), info, current.replacementDialog)) {
-                latestActions.dismissReplacementResult(info.token)
+            if (current.prompt == null && !current.needsPin && replacementDialogCanDismiss(owner.get(), info, current.operationDialog)) {
+                if (info.operation.kind == "deletion") latestActions.dismissDeletionResult(info.token)
+                else latestActions.dismissReplacementResult(info.token)
             }
         }
         Dialog(
@@ -87,19 +105,15 @@ internal fun ReplacementProgressDialog(state: AppUiState, actions: AppActions) {
                 ),
             ) {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("替换表盘", style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Medium)
+                    Text(operationDialogTitle(info), style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Medium)
                     if (info.title.isNotBlank()) Text(info.title.uiText(), style = MiuixTheme.textStyles.body1, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (info.fileName.isNotBlank()) Text(
+                    if (info.operation.kind == "replacement" && info.fileName.isNotBlank()) Text(
                         "HWT 文件：${info.fileName.uiText()}", style = MiuixTheme.textStyles.body2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         maxLines = 2, overflow = TextOverflow.Ellipsis,
                     )
                     val succeeded = replacementDialogSucceeded(info)
-                    val stageText = when {
-                        succeeded -> "表盘已替换"
-                        info.operation.stage == "CANCELLED" -> "替换已取消"
-                        else -> info.operation.detail.ifBlank { info.operation.stage.ifBlank { "等待替换状态" } }
-                    }
+                    val stageText = operationDialogStatusText(info)
                     Text(
                         stageText.uiText(), style = MiuixTheme.textStyles.body1,
                         color = when {

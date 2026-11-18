@@ -152,23 +152,25 @@ private fun HomeConnectionStatusCard(state: AppUiState, onOpenStatus: (Int, () -
                         fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = homeDeviceName(state).uiText(),
-                        fontSize = 15.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    homeDeviceName(state)?.let { name ->
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = name.uiText(),
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-private fun homeDeviceName(state: AppUiState): String {
-    // 已连接或正在连接时，只采用连接模型中的真实名称。
+private fun homeDeviceName(state: AppUiState): String? {
+    // 已连接或正在连接时，只采用连接模型中的真实名称；不从历史推测当前设备。
     if (state.connected || state.connecting) return state.watchName.ifBlank { "未知名称设备" }
-    val address = state.selectedDeviceAddress ?: return "未知名称设备"
+    val address = state.selectedDeviceAddress?.takeIf { it.isNotBlank() } ?: return "当前无历史设备"
     val selectedName = state.devices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name
         ?: state.savedDevices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name
     return selectedName?.takeIf { it.isNotBlank() } ?: "未知名称设备"

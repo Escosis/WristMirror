@@ -57,7 +57,7 @@ data class OperationInfo(
     val active: Boolean = false,
     val failed: Boolean = false,
 )
-/** 只含当前替换会话的展示快照；token 是本地任务身份，不随进度修订变化。 */
+/** 替换或删除会话的展示快照；kind 区分操作，token 是不随进度修订变化的本地任务身份。 */
 data class ReplacementDialogInfo(
     val token: Long,
     val connectionEpoch: Long,
@@ -72,7 +72,7 @@ data class ReplacementDialogInfo(
 /** 只保护界面令牌与关闭资格，不代替运行时的身份、代次或协议判断。 */
 internal object ReplacementDialogPolicy {
     fun canInterrupt(dialog: ReplacementDialogInfo?, token: Long): Boolean =
-        dialog != null && dialog.token == token && dialog.operation.active && !dialog.interruptRequested
+        dialog != null && dialog.operation.kind == "replacement" && dialog.token == token && dialog.operation.active && !dialog.interruptRequested
 
     fun canDismiss(dialog: ReplacementDialogInfo?, token: Long): Boolean =
         dialog != null && dialog.token == token && !dialog.operation.active
@@ -93,11 +93,13 @@ data class AppUiState(
     val devices: List<NearbyWatch> = emptyList(),
     val savedDevices: List<SavedWatch> = emptyList(),
     val autoConnect: Boolean = false,
+    /** 每安装的本地说明已读状态；旧公开界面 fixture 默认不占用模态窗口。 */
+    val introductionPending: Boolean = false,
     val autoCheckUpdate: Boolean = true,
     val checkingUpdate: Boolean = false,
     val updateMessage: String = "",
     val pendingUpdate: UpdateInfo? = null,
-    val appVersion: String = "1.0.0",
+    val appVersion: String = "1.0.1",
     val selectedDeviceAddress: String? = null,
     val connectionFormRevision: Long = 0L,
     // 明文编辑值只留在进程内，不进入界面恢复数据、普通偏好或日志。
@@ -127,6 +129,7 @@ data class AppUiState(
     val pickingHwt: Boolean = false,
     val operation: OperationInfo = OperationInfo(),
     val replacementDialog: ReplacementDialogInfo? = null,
+    val deletionDialog: ReplacementDialogInfo? = null,
     val prompt: ActionPrompt? = null,
     val needsPin: Boolean = false,
     val pinMessage: String = "请在手表确认配对，输入手表显示的配对码",
@@ -145,7 +148,10 @@ data class AppUiState(
     val statusMessage: String = "",
     val noticeSerial: Long = 0L,
     val noticeMessage: String = "",
-)
+) {
+    /** 运行时只保留一项可见操作会话；界面与旧回调使用同一个全模态守卫。 */
+    val operationDialog: ReplacementDialogInfo? get() = replacementDialog ?: deletionDialog
+}
 
 /** 界面操作边界，由实际运行时完成连接与表盘操作。 */
 interface AppActions {
@@ -160,6 +166,10 @@ interface AppActions {
     /** 只保存指定设备的配置；失败返回 false，其他设备的当前编辑值保持不变。 */
     fun saveHuaweiIdForDevice(device: NearbyWatch, value: String): Boolean
     fun setAutoConnect(enabled: Boolean)
+    /** 仅检查本地说明窗口资格，不代表厂商协议接受。真实 VM 还核对最新 Runtime。 */
+    fun introductionInteractionIsCurrent(): Boolean = false
+    /** 只有可靠保存本地已读标记才返回 true；不在此入口连接手表。 */
+    fun acknowledgeIntroduction(): Boolean = false
     fun setAutoCheckUpdate(enabled: Boolean)
     fun checkUpdates()
     fun dismissUpdate()
@@ -182,6 +192,8 @@ interface AppActions {
     /** 仅关闭同一令牌的非活动结果，不改变原生操作、错误或隔离状态。 */
     fun dismissReplacementResult(token: Long) {}
     fun requestDeletion()
+    /** 只关闭同一删除令牌的非活动结果；不提供删除中断，不改变错误、隔离或其他操作。 */
+    fun dismissDeletionResult(token: Long) {}
     fun confirmAction(token: Long)
     fun dismissAction(token: Long)
     fun exportLogs(uri: Uri)

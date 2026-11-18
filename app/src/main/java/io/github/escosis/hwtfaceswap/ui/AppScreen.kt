@@ -49,6 +49,8 @@ import io.github.escosis.hwtfaceswap.AppActions
 import io.github.escosis.hwtfaceswap.AppUiState
 import io.github.escosis.hwtfaceswap.NearbyWatch
 import io.github.escosis.hwtfaceswap.R
+import io.github.escosis.hwtfaceswap.UiPolicy
+import io.github.escosis.hwtfaceswap.UpdateInfo
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -74,9 +76,16 @@ fun WanJingApp(
     onConnect: (NearbyWatch, String) -> Unit,
     onPickHwt: () -> Unit,
     onExportLogs: () -> Unit,
+    onIntroductionDismissed: () -> Unit = {},
 ) {
     WanJingTheme(state.theme) {
         val context = LocalContext.current
+        val latestState by rememberUpdatedState(state)
+        val introductionHostPresent = IntroductionDialog(state, actions, onIntroductionDismissed)
+        val normalUiBlocked = UiPolicy.showIntroduction(state) || introductionHostPresent
+        val latestNormalUiBlocked by rememberUpdatedState(normalUiBlocked)
+        // 已读写入不提前放开底层控件：说明的同一 WindowDialog 仍正常退出时保持普通 UI 互斥。
+        val normalUiState = if(introductionHostPresent && !state.introductionPending) state.copy(introductionPending = true) else state
         val pagerState = rememberPagerState(pageCount = { 4 })
         val scope = rememberCoroutineScope()
         val focusManager = LocalFocusManager.current
@@ -88,7 +97,7 @@ fun WanJingApp(
         detailsTransition.targetState = showDetails
         val detailsVisible = detailsTransition.currentState || detailsTransition.targetState
         val latestDetailsVisible by rememberUpdatedState(detailsVisible)
-        val latestReplacementDialogPresent by rememberUpdatedState(state.replacementDialog != null)
+        val latestOperationDialogPresent by rememberUpdatedState(state.operationDialog != null)
         var isOverlayExpanded by remember { mutableStateOf(false) }
         var deviceWindowExpanded by remember { mutableStateOf(false) }
         var shownNotice by remember { mutableLongStateOf(state.noticeSerial) }
@@ -115,9 +124,10 @@ fun WanJingApp(
                 .collect { (page, scrolling) -> if(!scrolling) selectedPage = page }
         }
         // 连接和设备操作的确认窗口优先于关于页与更新提示。
-        LaunchedEffect(state.prompt?.token, state.needsPin, state.replacementDialog?.token) {
-            if(state.prompt != null || state.needsPin || state.replacementDialog != null) showDetails = false
-            if(state.replacementDialog != null) {
+        LaunchedEffect(state.prompt?.token, state.needsPin, state.operationDialog?.operation?.kind, state.operationDialog?.token,
+            state.introductionPending, introductionHostPresent) {
+            if(state.prompt != null || state.needsPin || state.operationDialog != null || state.introductionPending || introductionHostPresent) showDetails = false
+            if(state.operationDialog != null || normalUiBlocked) {
                 focusManager.clearFocus()
                 keyboardController?.hide()
             }
@@ -150,7 +160,7 @@ fun WanJingApp(
             }
         }
         fun navigateToTab(index: Int, sourceRequestCurrent: () -> Boolean = { true }) {
-            if(!navigationOwner.get() || latestDetailsVisible || latestReplacementDialogPresent || !sourceRequestCurrent()) return
+            if(!navigationOwner.get() || latestDetailsVisible || latestOperationDialogPresent || latestNormalUiBlocked || !sourceRequestCurrent()) return
             if(index != 1 || showDetails) {
                 focusManager.clearFocus()
                 keyboardController?.hide()
@@ -160,7 +170,7 @@ fun WanJingApp(
             val requestCurrent = {
                 tabNavigationRequestCurrent(
                     navigationOwner.get(), request, navigationRequest.get(), latestDetailsVisible,
-                    sourceRequestCurrent() && !latestReplacementDialogPresent,
+                    sourceRequestCurrent() && !latestOperationDialogPresent && !latestNormalUiBlocked,
                 )
             }
             pendingNavigationGuard[0] = requestCurrent
@@ -195,9 +205,9 @@ fun WanJingApp(
         NavigationBackHandler(
             state = navigationEventState,
             isBackEnabled = (detailsVisible || pagerState.currentPage != 0) &&
-                !overlayExpandedOnSettings && !deviceWindowExpanded && state.replacementDialog == null && state.prompt == null && !state.needsPin,
+                !overlayExpandedOnSettings && !deviceWindowExpanded && !normalUiBlocked && state.operationDialog == null && state.prompt == null && !state.needsPin,
             onBackCompleted = {
-                if(!latestReplacementDialogPresent) {
+                if(!latestOperationDialogPresent && !latestNormalUiBlocked) {
                     if(detailsVisible) showDetails = false else onTabClick(0)
                 }
             },
@@ -222,32 +232,33 @@ fun WanJingApp(
                 HorizontalPager(
                     state = pagerState,
                     beyondViewportPageCount = 3,
+                    userScrollEnabled = !normalUiBlocked,
                     modifier = Modifier.fillMaxSize().padding(paddingValues).consumeWindowInsets(paddingValues),
                 ) { page ->
                     when(page) {
                         0 -> CollapsingPage("腕镜") { insets, scrollModifier ->
                             HomeScreen(
-                                state, insets,
+                                normalUiState, insets,
                                 onOpenStatus = { destination, requestCurrent -> navigateToTab(destination, requestCurrent) },
                                 scrollModifier = scrollModifier,
                             )
                         }
                         1 -> CollapsingPage("设备") { insets, scrollModifier ->
                             DeviceScreen(
-                                state, actions, insets, onScan, onConnect,
+                                normalUiState, actions, insets, onScan, onConnect,
                                 onOpenFaces = { onTabClick(2) },
                                 onWindowExpandedChange = { deviceWindowExpanded = it },
                                 scrollModifier = scrollModifier,
                             )
                         }
                         2 -> CollapsingPage("表盘") { insets, scrollModifier ->
-                            FacesScreen(state, actions, insets, onPickHwt, scrollModifier)
+                            FacesScreen(normalUiState, actions, insets, onPickHwt, scrollModifier)
                         }
                         3 -> CollapsingPage("设置") { insets, scrollModifier ->
                             SettingsScreen(
-                                state, actions, insets,
-                                onNavigateToAbout = { if(!latestReplacementDialogPresent) { detailsPage = DetailsPage.ABOUT; showDetails = true } },
-                                onNavigateToLogs = { if(!latestReplacementDialogPresent) { detailsPage = DetailsPage.LOGS; showDetails = true } },
+                                normalUiState, actions, insets,
+                                onNavigateToAbout = { if(navigationOwner.get() && !latestOperationDialogPresent && !latestNormalUiBlocked && !latestState.introductionPending) { detailsPage = DetailsPage.ABOUT; showDetails = true } },
+                                onNavigateToLogs = { if(navigationOwner.get() && !latestOperationDialogPresent && !latestNormalUiBlocked && !latestState.introductionPending) { detailsPage = DetailsPage.LOGS; showDetails = true } },
                                 onOverlayExpandedChange = { isOverlayExpanded = it },
                                 scrollModifier = scrollModifier,
                             )
@@ -266,18 +277,20 @@ fun WanJingApp(
                     DetailsPage.LOGS -> LogsScreen(state, actions, onExportLogs, onBack = { showDetails = false })
                 }
             }
+            fun updateCallbackCurrent(info: UpdateInfo): Boolean = navigationOwner.get() && latestState.pendingUpdate == info &&
+                UiPolicy.showUpdate(latestState) && !latestNormalUiBlocked && !latestDetailsVisible &&
+                !(isOverlayExpanded && pagerState.currentPage == 3) && !deviceWindowExpanded
             state.pendingUpdate?.takeIf {
-                !detailsVisible && !overlayExpandedOnSettings && !deviceWindowExpanded && state.replacementDialog == null && !state.operation.active &&
-                    !state.connecting && !state.pickingHwt && !state.scanning && !state.listRefreshing && state.prompt == null && !state.needsPin
+                !detailsVisible && !overlayExpandedOnSettings && !deviceWindowExpanded && !introductionHostPresent && UiPolicy.showUpdate(state)
             }?.let { info ->
                 UpdateDialog(
                     info = info,
                     currentVersion = state.appVersion,
                     onDismiss = {
-                        if(navigationOwner.get() && !latestReplacementDialogPresent) actions.dismissUpdate()
+                        if(updateCallbackCurrent(info)) actions.dismissUpdate()
                     },
                     onOpenReleasePage = {
-                        if(navigationOwner.get() && !latestReplacementDialogPresent) {
+                        if(updateCallbackCurrent(info)) {
                             actions.dismissUpdate()
                             openProjectPage(context, info.releaseUrl.ifBlank { info.downloadUrl })
                         }

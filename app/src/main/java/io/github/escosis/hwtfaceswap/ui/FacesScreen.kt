@@ -83,7 +83,7 @@ internal fun FacesScreen(
     val selectedFace = state.faces.singleOrNull { it.id == state.selectedId }
     val available = UiPolicy.canOperateFaces(state)
     val canChange = available && selectedFace?.selectable == true
-    val busy = state.operation.active || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin
+    val busy = state.operation.active || state.operationDialog != null || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin
     LazyColumn(
         modifier = scrollModifier.fillMaxSize().consumeWindowInsets(insets).selectableGroup(),
         contentPadding = pageContentPadding(insets),
@@ -226,7 +226,7 @@ private fun faceSelectionFeedback(state: AppUiState): String? = when {
     state.unpairWorking || UiPolicy.isUnpairTarget(state, state.deviceAddress) -> "解除配对处理中，请稍候"
     !state.connected -> "请先前往设备页连接手表"
     state.quarantine -> "请重新连接后刷新表盘列表"
-    state.operation.active || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin -> "操作进行中，请保持连接并等待。"
+    state.operation.active || state.operationDialog != null || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin -> "操作进行中，请保持连接并等待。"
     state.listRefreshing -> "正在刷新表盘列表，请稍候"
     !state.listReady -> "请刷新表盘列表"
     else -> null

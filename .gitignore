@@ -8,6 +8,7 @@ local.properties
 .cxx/
 .externalNativeBuild/
 app/release/
+build/gradle-daemon-jvm.properties
 
 # 构建产物
 *.apk

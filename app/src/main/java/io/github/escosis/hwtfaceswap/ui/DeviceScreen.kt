@@ -1,5 +1,6 @@
 package io.github.escosis.hwtfaceswap.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -29,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -88,6 +90,7 @@ internal fun DeviceScreen(
     var historyIdConnectRequest by remember { mutableStateOf<HistoryIdConnectRequest?>(null) }
     var query by remember { mutableStateOf("") }
     val latestState by rememberUpdatedState(state)
+    val latestContext by rememberUpdatedState(LocalContext.current)
     val latestActions by rememberUpdatedState(actions)
     val latestOnScan by rememberUpdatedState(onScan)
     val latestOnConnect by rememberUpdatedState(onConnect)
@@ -117,6 +120,17 @@ internal fun DeviceScreen(
             callbackOwner.set(false)
             latestOnWindowExpandedChange(false)
         }
+    }
+
+    fun canUseTopControl(control: DeviceControl, rendered: AppUiState, renderedLocalEpoch: Long): Boolean =
+        DeviceControlsPolicy.canAct(rendered, latestState, control, callbackOwner.get(), renderedLocalEpoch, dialogEpoch.get(),
+            dialog != null || exitingDialog != null || pendingWindow != null || selectionRequest != null || historyIdConnectRequest != null)
+
+    fun showTopControlHint(control: DeviceControl, rendered: AppUiState, renderedLocalEpoch: Long) {
+        val hint = DeviceControlsPolicy.hintIfCurrent(rendered, latestState, control, callbackOwner.get(), renderedLocalEpoch, dialogEpoch.get(),
+            dialog != null || exitingDialog != null || pendingWindow != null || selectionRequest != null || historyIdConnectRequest != null) ?: return
+        // 与真实动作彻底分离：不关闭窗口、不扫描/选择/连接/解除配对，也不打开配置。
+        Toast.makeText(latestContext, hint.text, Toast.LENGTH_SHORT).show()
     }
 
     fun newDialog(window: DeviceWindow, address: String? = null, hostEpoch: Long? = null): DeviceDialog {
@@ -375,6 +389,7 @@ internal fun DeviceScreen(
     }
 
     val layoutDirection = LocalLayoutDirection.current
+    val topControlsEpoch = dialogEpoch.get()
     LazyColumn(
         modifier = scrollModifier.fillMaxSize().consumeWindowInsets(insets),
         contentPadding = PaddingValues(
@@ -389,21 +404,25 @@ internal fun DeviceScreen(
             SelectedWatchCard(
                 state = state,
                 device = selectedDevice,
-                onAdd = ::openDiscovery,
-                onConnect = { state.selectedDeviceAddress?.let { connectSelectedWatch(it, state.connectionEpoch) } },
+                onConnect = {
+                    if (canUseTopControl(DeviceControl.CONNECT, state, topControlsEpoch)) {
+                        state.selectedDeviceAddress?.let { connectSelectedWatch(it, state.connectionEpoch) }
+                    }
+                },
                 onConfigureId = {
-                    if (latestState.connectionEpoch == state.connectionEpoch) {
+                    if (canUseTopControl(DeviceControl.CONFIGURE_ID, state, topControlsEpoch)) {
                         state.selectedDeviceAddress?.let { openSelectedWindow(DeviceWindow.HUAWEI_ID, it) }
                     }
                 },
                 onUnpair = {
-                    if (latestState.selectedDeviceAddress == state.selectedDeviceAddress) {
+                    if (canUseTopControl(DeviceControl.UNPAIR, state, topControlsEpoch) && latestState.selectedDeviceAddress == state.selectedDeviceAddress) {
                         state.selectedDeviceAddress?.let { address ->
                             val target = selectedDevice ?: NearbyWatch(address, state.watchName.ifBlank { "未知名称设备" }, false)
                             unpairObservedWatch(target, state.connectionEpoch, state.unpairToken)
                         }
                     }
                 },
+                onDisabledHint = { control -> showTopControlHint(control, state, topControlsEpoch) },
                 onOpenFaces = {
                     val current = latestState
                     if (callbackOwner.get() && current.connected && !current.quarantine && canShowDeviceWindow(current) &&
@@ -473,17 +492,15 @@ internal fun DeviceScreen(
                 }
             }
         }
-        if (state.selectedDeviceAddress != null || state.savedDevices.isNotEmpty()) {
-            item(key = "add_watch") {
-                Card(Modifier.fillMaxWidth()) {
-                    ArrowPreference(
-                        title = "添加设备",
-                        summary = "搜索附近的手表",
-                        startAction = { IconTile(WatchIcons.Search) },
-                        enabled = canSelect,
-                        onClick = ::openDiscovery,
-                    )
-                }
+        item(key = "add_watch") {
+            Card(Modifier.fillMaxWidth()) {
+                ArrowPreference(
+                    title = "添加设备",
+                    summary = "搜索附近的手表",
+                    startAction = { IconTile(WatchIcons.Search) },
+                    enabled = canSelect,
+                    onClick = ::openDiscovery,
+                )
             }
         }
     }
@@ -599,92 +616,103 @@ private fun selectedWatch(state: AppUiState): NearbyWatch? {
 }
 
 private fun canUseConnectionActions(state: AppUiState): Boolean =
-    !state.unpairWorking && !state.operation.active && state.replacementDialog == null && state.prompt == null && !state.needsPin
+    !state.unpairWorking && !state.operation.active && state.operationDialog == null && state.prompt == null && !state.needsPin
 
 @Composable
 private fun SelectedWatchCard(
     state: AppUiState,
     device: NearbyWatch?,
-    onAdd: () -> Unit,
     onConnect: () -> Unit,
     onConfigureId: () -> Unit,
     onUnpair: () -> Unit,
+    onDisabledHint: (DeviceControl) -> Unit,
     onOpenFaces: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val latestState by rememberUpdatedState(state)
+    val controlsOwner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    DisposableEffect(controlsOwner) { onDispose { controlsOwner.set(false) } }
+    fun invokeControl(control: DeviceControl, action: () -> Unit) {
+        if (controlsOwner.get() && DeviceControlsPolicy.frameMatches(state, latestState) &&
+            DeviceControlsPolicy.enabled(state, control) && DeviceControlsPolicy.enabled(latestState, control)
+        ) action()
+    }
+    fun disabledHint(control: DeviceControl): (() -> Unit)? {
+        val expected = DeviceControlsPolicy.hint(state, control) ?: return null
+        return {
+            if (controlsOwner.get() && DeviceControlsPolicy.frameMatches(state, latestState) &&
+                !DeviceControlsPolicy.enabled(latestState, control) && expected == DeviceControlsPolicy.hint(latestState, control)
+            ) onDisabledHint(control)
+        }
+    }
+    val selectedAddress = state.selectedDeviceAddress?.takeIf { it.isNotBlank() }
     SectionCard {
-        if (state.selectedDeviceAddress == null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconTile(WatchIcons.Watch, size = 36)
-                Spacer(Modifier.width(12.dp))
-                Text("添加手表", style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Medium)
-            }
-            Spacer(Modifier.height(12.dp))
-            MutedText("搜索附近设备，选择后配置内部华为 ID 并连接。")
-            Spacer(Modifier.height(18.dp))
-            ActionButton("添加设备", onAdd, Modifier.fillMaxWidth(), primary = true, enabled = canSelectWatch(state))
-        } else {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconTile(WatchIcons.Watch, size = 32)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = "连接手表",
-                    modifier = Modifier.weight(1f),
-                    style = MiuixTheme.textStyles.body1,
-                )
-            }
-            Spacer(Modifier.height(14.dp))
-            WatchName(state, device, state.selectedDeviceAddress)
-            Spacer(Modifier.height(6.dp))
-            DeviceAddress(state.selectedDeviceAddress)
-            Spacer(Modifier.height(10.dp))
-            MutedText(
-                when {
-                    UiPolicy.isUnpairTarget(state, state.selectedDeviceAddress) -> "解除配对尚未完成，请在下方状态中继续。"
-                    state.quarantine -> "设备操作已暂停，请断开后重新连接。"
-                    state.connected -> "在此管理连接，设备状态与信息可在主页查看。"
-                    state.connecting -> "正在建立连接，可取消后重新选择设备。"
-                    state.huaweiIdInput.isBlank() -> "请先为这台设备配置内部华为 ID。"
-                    state.huaweiIdDirty -> "内部华为 ID 有未保存修改。"
-                    else -> "连接后可管理此手表的表盘。"
-                },
-            )
-            Spacer(Modifier.height(18.dp))
-            when {
-                state.connected -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ActionButton(
-                        "管理表盘", onOpenFaces, Modifier.weight(1f), primary = true,
-                        enabled = !state.quarantine && canShowDeviceWindow(state),
-                    )
-                    ActionButton("断开连接", onDisconnect, Modifier.weight(1f), enabled = canUseConnectionActions(state))
-                }
-                state.connecting -> ActionButton(
-                    "取消连接", onDisconnect, Modifier.fillMaxWidth(), enabled = canUseConnectionActions(state),
-                )
-                else -> ActionButton(
-                    text = if (state.huaweiIdInput.isBlank()) "配置华为 ID" else "连接手表",
-                    onClick = onConnect,
-                    modifier = Modifier.fillMaxWidth(),
-                    primary = true,
-                    enabled = device != null && canSelectWatch(state) && !UiPolicy.isUnpairTarget(state, state.selectedDeviceAddress),
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            ActionButton(
-                text = "配置华为 ID",
-                onClick = onConfigureId,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = UiPolicy.canEditHuaweiId(state),
-            )
-            Spacer(Modifier.height(10.dp))
-            ActionButton(
-                text = "解除配对",
-                onClick = onUnpair,
-                modifier = Modifier.fillMaxWidth(),
-                destructive = true,
-                enabled = UiPolicy.canRequestUnpair(state),
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconTile(WatchIcons.Watch, size = 32)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = "连接手表",
+                modifier = Modifier.weight(1f),
+                style = MiuixTheme.textStyles.body1,
             )
         }
+        Spacer(Modifier.height(14.dp))
+        if (selectedAddress != null) {
+            WatchName(state, device, selectedAddress)
+            Spacer(Modifier.height(6.dp))
+            DeviceAddress(selectedAddress)
+            Spacer(Modifier.height(10.dp))
+        }
+        MutedText(
+            when {
+                selectedAddress == null -> "搜索附近设备，选择后配置内部华为 ID 并连接。"
+                UiPolicy.isUnpairTarget(state, selectedAddress) -> "解除配对尚未完成，请在下方状态中继续。"
+                state.quarantine -> "设备操作已暂停，请断开后重新连接。"
+                state.connected -> "在此管理连接，设备状态与信息可在主页查看。"
+                state.connecting -> "正在建立连接，可取消后重新选择设备。"
+                !state.accountConfigured || state.huaweiIdInput.isBlank() -> "请先为这台设备配置内部华为 ID。"
+                state.huaweiIdDirty -> "内部华为 ID 有未保存修改。"
+                else -> "连接后可管理此手表的表盘。"
+            },
+        )
+        Spacer(Modifier.height(18.dp))
+        when {
+            state.connected -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionButton(
+                    "管理表盘", onOpenFaces, Modifier.weight(1f), primary = true,
+                    enabled = !state.quarantine && canShowDeviceWindow(state),
+                )
+                ActionButton("断开连接", onDisconnect, Modifier.weight(1f), enabled = canUseConnectionActions(state))
+            }
+            state.connecting -> ActionButton(
+                "取消连接", onDisconnect, Modifier.fillMaxWidth(), enabled = canUseConnectionActions(state),
+            )
+            else -> ActionButton(
+                text = "连接手表",
+                onClick = { invokeControl(DeviceControl.CONNECT, onConnect) },
+                modifier = Modifier.fillMaxWidth(),
+                primary = true,
+                enabled = DeviceControlsPolicy.enabled(state, DeviceControl.CONNECT),
+                disabledHint = disabledHint(DeviceControl.CONNECT),
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        ActionButton(
+            text = "配置华为 ID",
+            onClick = { invokeControl(DeviceControl.CONFIGURE_ID, onConfigureId) },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = DeviceControlsPolicy.enabled(state, DeviceControl.CONFIGURE_ID),
+            disabledHint = disabledHint(DeviceControl.CONFIGURE_ID),
+        )
+        Spacer(Modifier.height(10.dp))
+        ActionButton(
+            text = "解除配对",
+            onClick = { invokeControl(DeviceControl.UNPAIR, onUnpair) },
+            modifier = Modifier.fillMaxWidth(),
+            destructive = true,
+            enabled = DeviceControlsPolicy.enabled(state, DeviceControl.UNPAIR),
+            disabledHint = disabledHint(DeviceControl.UNPAIR),
+        )
     }
 }
 

@@ -1,6 +1,10 @@
 package io.github.escosis.hwtfaceswap.ui
 
+import android.app.Activity
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,12 +21,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathHitTester
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.heading
@@ -35,6 +52,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.Locale
 import io.github.escosis.hwtfaceswap.OperationInfo
 import top.yukonga.miuix.kmp.basic.Button
@@ -45,6 +64,8 @@ import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.squircle.addSquircleRect
+import top.yukonga.miuix.kmp.squircle.isSquircleEnabled
 import top.yukonga.miuix.kmp.theme.Colors
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -188,6 +209,7 @@ internal fun ActionButton(
     enabled: Boolean = true,
     primary: Boolean = false,
     destructive: Boolean = false,
+    disabledHint: (() -> Unit)? = null,
 ) {
     val scheme = MiuixTheme.colorScheme
     val colors = when {
@@ -195,9 +217,11 @@ internal fun ActionButton(
         primary -> ButtonDefaults.buttonColorsPrimary()
         else -> ButtonDefaults.buttonColors()
     }
+    // 没有显式 hint 的所有原按钮完全沿用原颜色、语义和点击路径。
+    val hintModifier = if (!enabled && disabledHint != null) disabledButtonHintModifier(disabledHint) else Modifier
     Button(
         onClick = onClick,
-        modifier = modifier.alpha(actionButtonOpacity(enabled, destructive)),
+        modifier = modifier.alpha(actionButtonOpacity(enabled, destructive)).then(hintModifier),
         enabled = enabled,
         colors = colors,
         cornerRadius = 16.dp,
@@ -205,6 +229,54 @@ internal fun ActionButton(
         insideMargin = PaddingValues(horizontal = 16.dp, vertical = 13.dp),
     ) {
         Text(text = text.uiText(), style = MiuixTheme.textStyles.button)
+    }
+}
+
+/** 提示只是同一 Button 的指针层；不声明可用点击语义，也不改变任何 disabled 颜色。 */
+@Composable
+private fun disabledButtonHintModifier(hint: () -> Unit): Modifier {
+    val owner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    val coordinates = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val latestHint by rememberUpdatedState(hint)
+    val latestContext by rememberUpdatedState(LocalContext.current)
+    val latestLifecycleOwner by rememberUpdatedState(LocalLifecycleOwner.current)
+    val latestWindowInfo by rememberUpdatedState(LocalWindowInfo.current)
+    val squircleEnabled = isSquircleEnabled()
+    DisposableEffect(owner) {
+        onDispose {
+            owner.set(false)
+            coordinates[0] = null
+        }
+    }
+    return Modifier.onGloballyPositioned { coordinates[0] = it }.pointerInput(owner, hint, squircleEnabled) {
+        fun visibleAt(position: androidx.compose.ui.geometry.Offset): Boolean {
+            val placed = coordinates[0] ?: return false
+            if (!owner.get() || latestHint !== hint || !placed.isAttached || placed.size != size ||
+                !latestWindowInfo.isWindowFocused || !latestLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            ) return false
+            val activity = latestContext as? Activity
+            if (activity?.isFinishing == true || activity?.isDestroyed == true) return false
+            // 裁剪后的当前布局，排除离屏 pager/滚动项及移除中的旧 owner。
+            val visibleBounds = placed.boundsInWindow(clipBounds = true)
+            return !visibleBounds.isEmpty && visibleBounds.contains(placed.localToWindow(position))
+        }
+        fun insideButton(position: androidx.compose.ui.geometry.Offset): Boolean {
+            val path = Path().apply {
+                addSquircleRect(size.width.toFloat(), size.height.toFloat(), 16.dp.toPx(), squircleEnabled = squircleEnabled)
+            }
+            return PathHitTester(path).contains(position)
+        }
+        awaitEachGesture {
+            // Foundation 1.12.1 的 disabled clickable 仍 consume Main-pass down/up。
+            // 在同一边界的 Initial pass 捕获合法 tap，内层仍 enabled=false，绝不借 onClick 执行真实动作。
+            val down = awaitFirstDown(pass = PointerEventPass.Initial)
+            if (!visibleAt(down.position) || !insideButton(down.position)) return@awaitEachGesture
+            down.consume()
+            val up = waitForUpOrCancellation(pass = PointerEventPass.Initial) ?: return@awaitEachGesture
+            if (!visibleAt(up.position) || !insideButton(up.position)) return@awaitEachGesture
+            up.consume()
+            hint()
+        }
     }
 }
 
