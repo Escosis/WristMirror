@@ -1,5 +1,6 @@
 package io.github.escosis.hwtfaceswap.ui
 
+import android.app.Activity
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -41,6 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -71,8 +78,13 @@ internal fun FacesScreen(
 ) {
     val context = LocalContext.current
     val latestState by rememberUpdatedState(state)
+    val latestActions by rememberUpdatedState(actions)
+    val latestContext by rememberUpdatedState(context)
+    val latestWindowInfo by rememberUpdatedState(LocalWindowInfo.current)
+    val latestLifecycleOwner by rememberUpdatedState(LocalLifecycleOwner.current)
+    val activationCoordinates = remember { arrayOfNulls<LayoutCoordinates>(1) }
     val owner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
-    DisposableEffect(owner) { onDispose { owner.set(false) } }
+    DisposableEffect(owner) { onDispose { owner.set(false); activationCoordinates[0] = null } }
     // 只随同一连接的刷新开始触发一次；型号回显、进度等普通重组不会重复提示。
     LaunchedEffect(state.connectionEpoch, state.listRefreshing) {
         val current = latestState
@@ -161,15 +173,30 @@ internal fun FacesScreen(
                         enabled = state.connected && !state.listRefreshing && !state.quarantine && !busy,
                     )
                     ActionButton(
+                        text = "启用表盘", onClick = {
+                            val placed = activationCoordinates[0]
+                            val activity = latestContext as? Activity
+                            if(owner.get() && latestActions === actions && latestWindowInfo.isWindowFocused &&
+                                latestLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                                activity?.isFinishing != true && activity?.isDestroyed != true &&
+                                placed?.isAttached == true && !placed.boundsInWindow(clipBounds = true).isEmpty &&
+                                activationButtonCurrent(selectedFace, state.connectionEpoch, latestState)) latestActions.requestActivation()
+                        },
+                        modifier = Modifier.weight(1f).onGloballyPositioned { activationCoordinates[0] = it },
+                        primary = true, enabled = canChange && selectedFace?.current == false,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ActionButton(
+                        text = "清除导入缓存", onClick = actions::clearCache,
+                        modifier = Modifier.weight(1f), enabled = !busy,
+                    )
+                    ActionButton(
                         text = "删除表盘", onClick = actions::requestDeletion,
                         modifier = Modifier.weight(1f), destructive = true, enabled = canChange,
                     )
                 }
-                Spacer(Modifier.height(12.dp))
-                ActionButton(
-                    text = "清除导入缓存", onClick = actions::clearCache,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), enabled = !busy,
-                )
             }
         }
         if(pageOperationCardVisible(state.operation)) {
@@ -211,6 +238,13 @@ internal fun FacesScreen(
             }
         }
     }
+}
+
+internal fun activationButtonCurrent(rendered: FaceItem?, epoch: Long, current: AppUiState): Boolean {
+    if(rendered == null || !rendered.selectable || rendered.current || current.connectionEpoch != epoch ||
+        current.selectedId != rendered.id || !UiPolicy.canOperateFaces(current)) return false
+    val actual = current.faces.singleOrNull { it.id == rendered.id } ?: return false
+    return actual.version == rendered.version && actual.selectable && !actual.current
 }
 
 /** 同一源的旧展开帧不能再次翻转状态；完整元数据改变也视为换源。 */
@@ -292,5 +326,6 @@ private fun SourceDetails(source: SourceInfo, modifier: Modifier = Modifier) {
         ValueRow("待传输内容", formatBytes(source.payloadBytes.toLong()))
         ValueRow("文件版本", source.xmlVersion.ifBlank { "未提供" })
         ValueRow("SHA-256", source.sha256.take(16) + "…")
+        HwtPreview(source)
     }
 }

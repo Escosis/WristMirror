@@ -11,13 +11,17 @@ import org.xml.sax.helpers.DefaultHandler;
 /** 仅处理通过系统文件选择器取得的本地输入；复制或提取原字节，绝不修改 XML、BIN 头或 ZIP 条目。 */
 public final class HwtSource {
     public enum Mode { BIN }
-    public final File directory, original, resource, bin;
-    public final String sourceHash, binHash, resourceHash, xmlVersion, screen, title;
+    public static final int MAX_PREVIEW_BYTES=2*1024*1024;
+    public final File directory, original, resource, bin, preview;
+    public final String sourceHash, binHash, resourceHash, xmlVersion, screen, title, previewHash;
     public final boolean resourceIsZip;
-    private HwtSource(File dir,File outer,File resource,File bin,boolean zip,String[] xml) throws IOException {
+    private HwtSource(File dir,File outer,File resource,File bin,boolean zip,String[] xml,File preview) throws IOException {
         this.directory=dir;this.original=outer;this.resource=resource;this.bin=bin;this.resourceIsZip=zip;
         this.sourceHash=Core.hex(Core.digest(outer));this.resourceHash=Core.hex(Core.digest(resource));
         this.binHash=bin==null?null:Core.hex(Core.digest(bin));this.xmlVersion=xml[0];this.screen=xml[1];this.title=xml[2];
+        File acceptedPreview=preview;String acceptedHash=null;
+        if(preview!=null)try{acceptedHash=Core.hex(Core.digest(preview));}catch(IOException ignored){acceptedPreview=null;}
+        this.preview=acceptedPreview;this.previewHash=acceptedHash;
     }
     public static HwtSource load(InputStream input,File privateFiles) throws IOException {
         File parent=new File(privateFiles,"local-hwt");
@@ -32,7 +36,7 @@ public final class HwtSource {
     }
     public static HwtSource inspect(File outer,File dir) throws IOException {
         if(outer.length()<=0 || outer.length()>Core.MAX_SOURCE) throw new Core.Fault("SOURCE_SIZE_LIMIT");
-        File resource=new File(dir,"resource.data"), bin=null;
+        File resource=new File(dir,"resource.data"), bin=null, preview=null;
         String[] xml={"unknown","unknown","本地 HWT"};
         try(ZipFile zip=new ZipFile(outer)) {
             Map<String,ZipEntry> entries=index(zip);
@@ -42,6 +46,7 @@ public final class HwtSource {
             ZipEntry description=entries.get(prefix+"description.xml");
             if(description!=null) xml=description(readMember(zip,description,65536));
             extract(zip,entries.get(prefix+"com.huawei.watchface"),resource);
+            preview=extractPreview(zip,entries,prefix,dir);
         } catch(ZipException e) { throw new Core.Fault("SOURCE_NOT_READABLE_HWT"); }
         boolean zip=zipMagic(resource);
         if(zip) {
@@ -50,7 +55,37 @@ public final class HwtSource {
                 if(e!=null) { bin=new File(dir,"watchface.bin");extract(inner,e,bin); }
             } catch(ZipException e) { throw new Core.Fault("INNER_RESOURCE_ZIP_INVALID"); }
         } else bin=resource;
-        return new HwtSource(dir,outer,resource,bin,zip,xml);
+        return new HwtSource(dir,outer,resource,bin,zip,xml,preview);
+    }
+    /** 预览是可选旁路；只读取固定候选成员，失败不改变资源提取或原始载荷。 */
+    private static File extractPreview(ZipFile zip,Map<String,ZipEntry> entries,String prefix,File dir) {
+        String[] candidates={"preview/cover.jpg","preview/cover.jpeg","preview/cover.png","preview/cover.webp","preview/cover.gif",
+            "preview/preview.png","preview/preview.jpg","preview/preview.jpeg","preview/preview.webp","preview/preview.gif",
+            "preview.png","preview.jpg","preview.jpeg","preview.webp","preview.gif","cover.png","cover.jpg","cover.jpeg","cover.webp",
+            "preview/icon_small.png","preview/icon_small.jpg","preview/icon_small.jpeg","preview/icon_small.webp"};
+        for(String candidate:candidates){
+            ZipEntry found=null;boolean ambiguous=false;String wanted=(prefix+candidate).toLowerCase(Locale.ROOT);
+            for(Map.Entry<String,ZipEntry> entry:entries.entrySet())if(entry.getKey().toLowerCase(Locale.ROOT).equals(wanted)){
+                if(found!=null){ambiguous=true;break;}found=entry.getValue();
+            }
+            if(found==null||ambiguous||found.isDirectory()||found.getSize()<=0||found.getSize()>MAX_PREVIEW_BYTES)continue;
+            if(found.getCompressedSize()>0&&found.getSize()>found.getCompressedSize()*500L)continue;
+            try{
+                byte[] bytes;try(InputStream in=zip.getInputStream(found)){bytes=Core.read(in,MAX_PREVIEW_BYTES);}
+                CRC32 crc=new CRC32();crc.update(bytes);
+                if(bytes.length!=found.getSize()||crc.getValue()!=found.getCrc()||!previewMagic(bytes))continue;
+                File output=new File(dir,"preview.image");
+                try(OutputStream out=new BufferedOutputStream(new FileOutputStream(output))){out.write(bytes);}
+                return output;
+            }catch(IOException ignored){ /* 缺失、坏图和私有预览写入失败均不阻止有效 HWT。 */ }
+        }
+        return null;
+    }
+    private static boolean previewMagic(byte[] b){
+        if(b.length>=8&&(b[0]&255)==137&&b[1]==80&&b[2]==78&&b[3]==71&&b[4]==13&&b[5]==10&&b[6]==26&&b[7]==10)return true;
+        if(b.length>=3&&(b[0]&255)==255&&(b[1]&255)==216&&(b[2]&255)==255)return true;
+        if(b.length>=12&&b[0]==82&&b[1]==73&&b[2]==70&&b[3]==70&&b[8]==87&&b[9]==69&&b[10]==66&&b[11]==80)return true;
+        return b.length>=6&&b[0]==71&&b[1]==73&&b[2]==70&&b[3]==56&&(b[4]==55||b[4]==57)&&b[5]==97;
     }
     private static Map<String,ZipEntry> index(ZipFile zip) throws IOException {
         Map<String,ZipEntry> map=new HashMap<String,ZipEntry>();Enumeration<? extends ZipEntry> all=zip.entries();int count=0;

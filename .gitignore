@@ -9,6 +9,7 @@ local.properties
 .externalNativeBuild/
 app/release/
 build/gradle-daemon-jvm.properties
+app/src/test/
 
 # 构建产物
 *.apk

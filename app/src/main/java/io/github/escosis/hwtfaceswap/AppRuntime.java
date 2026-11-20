@@ -19,10 +19,11 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     public static final class Snapshot {
         public final String code,detail,deviceAddress,serialNumber,firmware,deviceModel,kind,stage,operationDetail,message,pinMessage;
         public final boolean ready,connecting,needsPin,listReady,listRefreshing,active,failed;
-        public final int rebind;public final long epoch,generation,operationRevision,replacementDialogRevision,deletionDialogRevision;
+        public final int rebind;public final long epoch,generation,operationRevision,replacementDialogRevision,deletionDialogRevision,activationDialogRevision;
         public final WatchfaceManager.ReplacementIdentity replacementIdentity,replacementDialogIdentity;
         public final WatchfaceManager.DeletionIdentity deletionIdentity,deletionDialogIdentity;
-        public final ReplacementDialogInfo replacementDialog,deletionDialog;
+        public final WatchfaceManager.ActivationIdentity activationIdentity,activationDialogIdentity;
+        public final ReplacementDialogInfo replacementDialog,deletionDialog,activationDialog;
         public final Integer width,height,progress,batteryPercent;public final Long capability,freeMemoryBytes;
         public final List<TlvView.Face> faces;public final Map<String,String> names;
         Snapshot(AppRuntime r){
@@ -30,9 +31,10 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
             operationDetail=r.operationDetail;message=r.message;pinMessage=r.pinMessage;
             ready=r.ready;connecting=r.connecting;needsPin=r.needsPin;listReady=r.listReady;
             listRefreshing=r.listRefreshing;active=r.active;failed=r.failed;rebind=r.rebind;
-            epoch=r.epoch;generation=r.generation;operationRevision=r.operationRevision;replacementDialogRevision=r.replacementDialogRevision;deletionDialogRevision=r.deletionDialogRevision;
+            epoch=r.epoch;generation=r.generation;operationRevision=r.operationRevision;replacementDialogRevision=r.replacementDialogRevision;deletionDialogRevision=r.deletionDialogRevision;activationDialogRevision=r.activationDialogRevision;
             replacementIdentity=r.replacementIdentity;replacementDialogIdentity=r.replacementRequest==null?null:r.replacementRequest.identity;replacementDialog=r.replacementDialog;
             deletionIdentity=r.deletionIdentity;deletionDialogIdentity=r.deletionRequest==null?null:r.deletionRequest.identity;deletionDialog=r.deletionDialog;
+            activationIdentity=r.activationIdentity;activationDialogIdentity=r.activationRequest==null?null:r.activationRequest.identity;activationDialog=r.activationDialog;
             width=r.width;height=r.height;progress=r.progress;
             capability=r.capability;batteryPercent=r.batteryPercent;freeMemoryBytes=r.freeMemoryBytes;faces=Collections.unmodifiableList(new ArrayList<>(r.visible));
             names=Collections.unmodifiableMap(new HashMap<>(r.names));
@@ -45,13 +47,15 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     private String code="IDLE",detail="尚未连接",deviceAddress="",serialNumber="未知",firmware="未知",kind="",stage="",operationDetail="",message="",pinMessage="";
     private String deviceModel;
     private boolean ready,connecting,needsPin,listReady,listRefreshing,active,failed;
-    private int rebind;private long epoch,generation,operationRevision,replacementDialogRevision,deletionDialogRevision;private Integer width,height,progress,batteryPercent;private Long capability,freeMemoryBytes;
+    private int rebind;private long epoch,generation,operationRevision,replacementDialogRevision,deletionDialogRevision,activationDialogRevision;private Integer width,height,progress,batteryPercent;private Long capability,freeMemoryBytes;
     private WatchfaceManager.ReplacementIdentity replacementIdentity;
     private WatchfaceManager.DeletionIdentity deletionIdentity;
+    private WatchfaceManager.ActivationIdentity activationIdentity;
     // 进程内会话只保存标题/文件名与不可变本地身份；不保存 URI、账户、密钥或可恢复页面数据。
     private WatchfaceManager.ReplacementRequest replacementRequest;
     private WatchfaceManager.DeletionRequest deletionRequest;
-    private ReplacementDialogInfo replacementDialog,deletionDialog;
+    private WatchfaceManager.ActivationRequest activationRequest;
+    private ReplacementDialogInfo replacementDialog,deletionDialog,activationDialog;
     // UI 退休不清原生历史；即使旧活动摘要晚到，也不能重开已关闭或已让位的会话。
     private final Set<Long> retiredDialogTokens=new HashSet<>();
     private List<TlvView.Face> visible=Collections.emptyList();private Map<String,String> names=Collections.emptyMap();
@@ -67,7 +71,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         unpair=new DeviceRemovalController(platform,new DeviceRemovalController.Queue(){
             public void post(Runnable task){connection.post(task);}public void delay(Runnable task,long ms){connection.delay(task,ms);}public long now(){return SystemClock.elapsedRealtime();}
         },new DeviceRemovalController.Transport(){
-            public boolean busy(){Snapshot s=snapshot();return watchfaces.busy()||s.active||activeDialog(s.replacementDialog)||activeDialog(s.deletionDialog);}
+            public boolean busy(){Snapshot s=snapshot();return watchfaces.busy()||s.active||activeDialog(s.replacementDialog)||activeDialog(s.deletionDialog)||activeDialog(s.activationDialog);}
             public void stopTarget(String address){connection.stopForUnpair(address);}
         },new DeviceRemovalController.Records(){
             public List<DeviceRemovalController.Record> pending()throws Exception{List<DeviceRemovalController.Record> result=new ArrayList<>();for(DeviceRemovalJournal.Pending p:secure.removals().pending())result.add(removalRecord(p));return result;}
@@ -87,12 +91,13 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     public void addObserver(Observer o){observers.addIfAbsent(o);o.changed(snapshot());}
     public void removeObserver(Observer o){observers.remove(o);}
     private static boolean activeDialog(ReplacementDialogInfo dialog){return dialog!=null&&dialog.getOperation().getActive();}
-    private boolean activeOperationDialog(){return activeDialog(replacementDialog)||activeDialog(deletionDialog);}
-    private void publish(){Snapshot s=snapshot();for(Observer o:observers)o.changed(s);ConnectionService.runtimeState(s.connecting||s.ready,s.active||activeDialog(s.replacementDialog)||activeDialog(s.deletionDialog),s.code);}
+    private boolean activeOperationDialog(){return activeDialog(replacementDialog)||activeDialog(deletionDialog)||activeDialog(activationDialog);}
+    private void publish(){Snapshot s=snapshot();for(Observer o:observers)o.changed(s);ConnectionService.runtimeState(s.connecting||s.ready,s.active||activeDialog(s.replacementDialog)||activeDialog(s.deletionDialog)||activeDialog(s.activationDialog),s.code);}
     /** 在同一次发布中退休旧终态，避免共享 getter 用旧替换结果遮住新删除。 */
     private void retireDialogSessions(){
         if(replacementDialog!=null){retiredDialogTokens.add(replacementDialog.getToken());replacementDialog=null;replacementRequest=null;replacementDialogRevision++;}
         if(deletionDialog!=null){retiredDialogTokens.add(deletionDialog.getToken());deletionDialog=null;deletionRequest=null;deletionDialogRevision++;}
+        if(activationDialog!=null){retiredDialogTokens.add(activationDialog.getToken());activationDialog=null;activationRequest=null;activationDialogRevision++;}
     }
     private void installReplacementDialog(WatchfaceManager.ReplacementRequest request,String title,String fileName){
         retireDialogSessions();replacementRequest=request;WatchfaceManager.ReplacementIdentity identity=request.identity;
@@ -103,6 +108,15 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         retireDialogSessions();deletionRequest=request;WatchfaceManager.DeletionIdentity identity=request.identity;
         deletionDialog=new ReplacementDialogInfo(identity.token,identity.epoch,identity.id,identity.version,title,"",new OperationInfo("deletion","WAIT_OPERATION","正在开始删除",null,true,false),false);
         deletionDialogRevision++;
+    }
+    private void installActivationDialog(WatchfaceManager.ActivationRequest request,String title){
+        retireDialogSessions();activationRequest=request;WatchfaceManager.ActivationIdentity identity=request.identity;
+        activationDialog=new ReplacementDialogInfo(identity.token,identity.epoch,identity.id,identity.version,title,"",new OperationInfo("activation","WAIT_OPERATION","正在启用表盘",null,true,false),false);
+        activationDialogRevision++;
+    }
+    public synchronized boolean openActivationDialog(WatchfaceManager.ActivationRequest request,String title){
+        if(request==null||request==activationRequest||retiredDialogTokens.contains(request.identity.token)||activeOperationDialog())return false;
+        installActivationDialog(request,title);publish();return true;
     }
     /** 确认立即创建 WAIT_OPERATION，旧 LISTED 摘要不能被借给尚未进入 actor 的新请求。 */
     public synchronized boolean openReplacementDialog(WatchfaceManager.ReplacementRequest request,String title,String fileName){
@@ -131,6 +145,17 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         ReplacementDialogInfo old=deletionDialog;
         deletionDialog=new ReplacementDialogInfo(old.getToken(),old.getConnectionEpoch(),old.getTargetId(),old.getTargetVersion(),old.getTitle(),"",new OperationInfo("deletion",stage,detail,progress,active,failed),false);
         deletionDialogRevision++;
+    }
+    private boolean ownsActivationDialog(WatchfaceManager.ActivationIdentity identity){
+        return identity!=null&&activationRequest!=null&&activationRequest.identity==identity&&activationDialog!=null&&"activation".equals(activationDialog.getOperation().getKind())&&activationDialog.getToken()==identity.token&&activationDialog.getConnectionEpoch()==identity.epoch&&Objects.equals(activationDialog.getTargetId(),identity.id)&&Objects.equals(activationDialog.getTargetVersion(),identity.version);
+    }
+    private void updateActivationDialog(WatchfaceManager.ActivationIdentity identity,String stage,String detail,boolean active,boolean failed){
+        if(!ownsActivationDialog(identity))return;ReplacementDialogInfo old=activationDialog;
+        activationDialog=new ReplacementDialogInfo(old.getToken(),old.getConnectionEpoch(),old.getTargetId(),old.getTargetVersion(),old.getTitle(),"",new OperationInfo("activation",stage,detail,null,active,failed),false);activationDialogRevision++;
+    }
+    public synchronized void rejectActivationDialog(WatchfaceManager.ActivationIdentity identity,String code){
+        if(!ownsActivationDialog(identity)||!activationDialog.getOperation().getActive()||watchfaces.activationIdentity()==identity)return;
+        updateActivationDialog(identity,"PRECHECK_FAILED",code,false,true);publish();
     }
     /** 仅界面廉价前检拒绝，不改变原生操作、错误或隔离。 */
     public synchronized void rejectReplacementDialog(WatchfaceManager.ReplacementIdentity identity,String code){
@@ -161,6 +186,10 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     public synchronized boolean dismissDeletionResult(WatchfaceManager.DeletionIdentity identity){
         if(!ownsDeletionDialog(identity)||deletionDialog.getOperation().getActive())return false;
         retiredDialogTokens.add(identity.token);deletionDialog=null;deletionRequest=null;deletionDialogRevision++;publish();return true;
+    }
+    public synchronized boolean dismissActivationResult(WatchfaceManager.ActivationIdentity identity){
+        if(!ownsActivationDialog(identity)||activationDialog.getOperation().getActive())return false;
+        retiredDialogTokens.add(identity.token);activationDialog=null;activationRequest=null;activationDialogRevision++;publish();return true;
     }
     public synchronized void onConnection(String code,String detail,boolean ready,boolean connecting,int rebindCount,long epoch){
         if(epoch!=connection.epoch()||((ready||connecting)&&removalBlocksCurrent()))return;
@@ -200,7 +229,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     }
     public synchronized void onReady(long epoch,LinkCapabilities caps){
         if(epoch!=connection.epoch()||this.epoch!=epoch||removalBlocksCurrent())return;
-        kind="";stage="";operationDetail="";message="";active=false;failed=false;progress=null;replacementIdentity=null;deletionIdentity=null;operationRevision++;
+        kind="";stage="";operationDetail="";message="";active=false;failed=false;progress=null;replacementIdentity=null;deletionIdentity=null;activationIdentity=null;operationRevision++;
         publish();watchfaces.authenticated(epoch);
     }
     public void onPacket(long epoch,int service,int command,byte[] body,boolean encrypted){if(removalBlocksCurrent())return;watchfaces.packet(epoch,service,command,body,encrypted);}
@@ -216,14 +245,14 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         publish();
     }
     public synchronized void onParameters(Integer width,Integer height,Long capability){this.width=width;this.height=height;this.capability=capability;publish();}
-    public synchronized void onOperation(String kind,String stage,String detail,Integer progress,boolean active,boolean failed){operationRevision++;replacementIdentity=null;deletionIdentity=null;this.kind=kind;this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;publish();}
+    public synchronized void onOperation(String kind,String stage,String detail,Integer progress,boolean active,boolean failed){operationRevision++;replacementIdentity=null;deletionIdentity=null;activationIdentity=null;this.kind=kind;this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;publish();}
     @Override public synchronized void onReplacementOperation(WatchfaceManager.ReplacementIdentity identity,String stage,String detail,Integer progress,boolean active,boolean failed){
         WatchfaceManager.ReplacementRequest current=watchfaces.currentReplacementRequest();
         if(identity==null||current==null||current.identity!=identity||watchfaces.replacementIdentity()!=identity||(active&&identity.epoch!=connection.epoch()))return;
         // 旧回调只能更新仍由 manager 发布的同一摘要；新会话的标题、文件名不从当前选择重建。
         if(!ownsReplacementDialog(identity)&&active&&!activeOperationDialog()&&!retiredDialogTokens.contains(identity.token))installReplacementDialog(current,identity.id,"本地 HWT");
         if(replacementIdentity!=identity)message="";
-        operationRevision++;replacementIdentity=identity;deletionIdentity=null;kind="replacement";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
+        operationRevision++;replacementIdentity=identity;deletionIdentity=null;activationIdentity=null;kind="replacement";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
         updateReplacementDialog(identity,stage,detail,progress,active,failed);publish();
     }
     @Override public synchronized void onReplacementRequestFinished(WatchfaceManager.ReplacementIdentity identity,String stage,String detail,boolean failed){
@@ -240,7 +269,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         if(identity==null||current==null||current.identity!=identity||watchfaces.deletionIdentity()!=identity||(active&&identity.epoch!=connection.epoch()))return;
         if(!ownsDeletionDialog(identity)&&active&&!activeOperationDialog()&&!retiredDialogTokens.contains(identity.token))installDeletionDialog(current,identity.id);
         if(deletionIdentity!=identity)message="";
-        operationRevision++;deletionIdentity=identity;replacementIdentity=null;kind="deletion";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
+        operationRevision++;deletionIdentity=identity;replacementIdentity=null;activationIdentity=null;kind="deletion";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
         updateDeletionDialog(identity,stage,detail,progress,active,failed);publish();
     }
     @Override public synchronized void onDeletionRequestFinished(WatchfaceManager.DeletionIdentity identity,String stage,String detail,boolean failed){
@@ -250,6 +279,23 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     @Override public synchronized void onDeletionError(WatchfaceManager.DeletionIdentity identity,String error){
         WatchfaceManager.DeletionRequest current=watchfaces.currentDeletionRequest();
         if(identity==null||current==null||current.identity!=identity||deletionIdentity!=identity||watchfaces.deletionIdentity()!=identity)return;
+        message=error;publish();
+    }
+    @Override public synchronized void onActivationOperation(WatchfaceManager.ActivationIdentity identity,String stage,String detail,boolean active,boolean failed){
+        WatchfaceManager.ActivationRequest current=watchfaces.currentActivationRequest();
+        if(identity==null||current==null||current.identity!=identity||watchfaces.activationIdentity()!=identity||(active&&identity.epoch!=connection.epoch()))return;
+        if(!ownsActivationDialog(identity)&&active&&!activeOperationDialog()&&!retiredDialogTokens.contains(identity.token))installActivationDialog(current,identity.id);
+        if(activationIdentity!=identity)message="";
+        operationRevision++;activationIdentity=identity;replacementIdentity=null;deletionIdentity=null;kind="activation";this.stage=stage;operationDetail=detail;progress=null;this.active=active;this.failed=failed;
+        updateActivationDialog(identity,stage,detail,active,failed);publish();
+    }
+    @Override public synchronized void onActivationRequestFinished(WatchfaceManager.ActivationIdentity identity,String stage,String detail,boolean failed){
+        if(!ownsActivationDialog(identity)||!activationDialog.getOperation().getActive()||watchfaces.activationIdentity()==identity)return;
+        updateActivationDialog(identity,stage,detail,false,failed);publish();
+    }
+    @Override public synchronized void onActivationError(WatchfaceManager.ActivationIdentity identity,String error){
+        WatchfaceManager.ActivationRequest current=watchfaces.currentActivationRequest();
+        if(identity==null||current==null||current.identity!=identity||activationIdentity!=identity||watchfaces.activationIdentity()!=identity)return;
         message=error;publish();
     }
     public void onPreparedDeletion(TlvView.Face face,long epoch){if(epoch!=connection.epoch()||!connection.ready())return;for(Observer o:observers)o.deletionPrepared(face,epoch);}

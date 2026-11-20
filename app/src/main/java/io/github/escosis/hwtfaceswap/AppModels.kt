@@ -48,6 +48,8 @@ data class SourceInfo(
     val payloadBytes: Int,
     val xmlVersion: String,
     val sha256: String,
+    val previewPath: String? = null,
+    val previewSha256: String? = null,
 )
 data class OperationInfo(
     val kind: String = "",
@@ -130,6 +132,7 @@ data class AppUiState(
     val operation: OperationInfo = OperationInfo(),
     val replacementDialog: ReplacementDialogInfo? = null,
     val deletionDialog: ReplacementDialogInfo? = null,
+    val activationDialog: ReplacementDialogInfo? = null,
     val prompt: ActionPrompt? = null,
     val needsPin: Boolean = false,
     val pinMessage: String = "请在手表确认配对，输入手表显示的配对码",
@@ -150,7 +153,7 @@ data class AppUiState(
     val noticeMessage: String = "",
 ) {
     /** 运行时只保留一项可见操作会话；界面与旧回调使用同一个全模态守卫。 */
-    val operationDialog: ReplacementDialogInfo? get() = replacementDialog ?: deletionDialog
+    val operationDialog: ReplacementDialogInfo? get() = replacementDialog ?: deletionDialog ?: activationDialog
 }
 
 /** 界面操作边界，由实际运行时完成连接与表盘操作。 */
@@ -191,6 +194,9 @@ interface AppActions {
     fun interruptReplacement(token: Long) {}
     /** 仅关闭同一令牌的非活动结果，不改变原生操作、错误或隔离状态。 */
     fun dismissReplacementResult(token: Long) {}
+    /** 对所选已安装普通表盘使用原版本启用，不需要 HWT 文件。 */
+    fun requestActivation() {}
+    fun dismissActivationResult(token: Long) {}
     fun requestDeletion()
     /** 只关闭同一删除令牌的非活动结果；不提供删除中断，不改变错误、隔离或其他操作。 */
     fun dismissDeletionResult(token: Long) {}

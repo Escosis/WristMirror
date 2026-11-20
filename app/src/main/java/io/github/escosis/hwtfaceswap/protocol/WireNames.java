@@ -7,7 +7,7 @@ import java.util.*;
 
 /**
  * 独立处理 27/06 TLV 数据体；协议依据为运动健康 sendGetNameCommand()/handleOneTlv()，
- * 以及原生实现中明确解析 82/83 名称响应的流程；不调用厂商组件、Android 或网络。
+ * 原通用 TLV 以 tag bit7 标记父容器，名称消费者读取两层父容器；不调用厂商组件、Android 或网络。
  * 此命令没有 version/nonce；调用方必须关联设备、尚未完成请求的协议 ID
  * 及对应的列表观察，绝不据此判定认证结果。
  */
@@ -17,6 +17,16 @@ public final class WireNames {
     public static final int MAX_REQUEST_IDS=(TlvView.MAX_FIELDS-2)/2;
     private static final int MAX_ID_TEXT_BYTES=32;
     private WireNames() {}
+
+    /** 有界解析的不可变结果；ids 包含名称为空或缺失但通过验证的协议 ID。 */
+    public static final class Response {
+        public final Map<String,String> names;
+        public final Set<String> ids;
+        private Response(Map<String,String> names,Set<String> ids) {
+            this.names=Collections.unmodifiableMap(new LinkedHashMap<String,String>(names));
+            this.ids=Collections.unmodifiableSet(new LinkedHashSet<String>(ids));
+        }
+    }
 
     private static boolean validId(String id) {
         try{Core.resource(id,"0.0");return true;}catch(IOException e){return false;}
@@ -49,24 +59,35 @@ public final class WireNames {
         return out.toByteArray();
     }
 
+    /** 保留原名称映射 API；完整验证由 parseResponse 执行。 */
+    public static Map<String,String> parse(List<TlvView.Part> fields) throws IOException {
+        return parseResponse(fields).names;
+    }
+
     /**
      * 调用方验证原生 27/06 包头后传入的字段。
-     * 解析全部已知 82 根及重复 83 条目；不递归猜测未知容器。
+     * 仅在根及条目两层按 tag bit7 接受父容器（含原 82/83）；不递归、扫描或扁平化。
      * 条目 04 是 ID，05 是名称，06 简介、07 大小、08 实例仅作为元数据。
-     * 名称空或缺失、ID 不支持或缺失时只省略该关联，绝不编造名称。
+     * 名称空或缺失时保留有效 ID，但省略名称关联；ID 不支持或缺失时省略条目，绝不编造名称。
      * UTF-8 非法或超限、关键标签重复、有效 ID 重复时均报错。
-     * 存在但为空的 82 表示空结果；缺失 82 明确表示可选查询失败。
+     * 根 7F 只作唯一的有界数值控制码；0/100000 不代替名称容器，其他值单独报设备错误。
+     * 存在但为空的父容器表示空结果；缺失父容器明确表示可选查询失败。
      * 多个根或页面可在本次有界解析内合并；跨包重复 ID
      * 及迟到响应由请求拥有者另行处理。
      */
-    public static Map<String,String> parse(List<TlvView.Part> fields) throws IOException {
+    public static Response parseResponse(List<TlvView.Part> fields) throws IOException {
         Budget budget=new Budget();budget.initial(fields);
+        TlvView.Part error=unique(fields,0x7f);
+        if(error!=null){
+            long code=Core.number(error.value);
+            if(code!=0 && code!=100000)throw new Core.Fault("NAMES_DEVICE_ERROR_"+code);
+        }
         LinkedHashMap<String,String> result=new LinkedHashMap<String,String>();
-        HashSet<String> seenIds=new HashSet<String>();boolean container=false;
+        LinkedHashSet<String> seenIds=new LinkedHashSet<String>();boolean container=false;
         for(TlvView.Part root:fields){
-            if(root.tag!=0x82)continue;container=true;
+            if((root.tag&0x80)==0)continue;container=true;
             for(TlvView.Part entry:budget.decode(root.value)){
-                if(entry.tag!=0x83)continue;
+                if((entry.tag&0x80)==0)continue;
                 List<TlvView.Part> data=budget.decode(entry.value);
                 TlvView.Part idField=unique(data,4),nameField=unique(data,5);
                 String id=null,name=null;
@@ -86,7 +107,7 @@ public final class WireNames {
             }
         }
         if(!container)throw new Core.Fault("NAMES_RESPONSE_CONTAINER_MISSING");
-        return Collections.unmodifiableMap(result);
+        return new Response(result,seenIds);
     }
 
     private static boolean hasVisibleText(String name) {

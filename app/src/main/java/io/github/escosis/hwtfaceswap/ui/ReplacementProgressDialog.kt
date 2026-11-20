@@ -38,7 +38,7 @@ import top.yukonga.miuix.kmp.layout.DialogDefaults
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal fun pageOperationCardVisible(operation: OperationInfo): Boolean =
-    operation.kind != "replacement" && operation.kind != "deletion" &&
+    operation.kind != "replacement" && operation.kind != "deletion" && operation.kind != "activation" &&
         (operation.active || operation.failed || operation.stage.isNotBlank())
 
 internal fun replacementDialogSameOwner(rendered: ReplacementDialogInfo, current: ReplacementDialogInfo?): Boolean =
@@ -53,17 +53,21 @@ internal fun replacementDialogSucceeded(info: ReplacementDialogInfo): Boolean =
     !info.operation.active && !info.operation.failed && when (info.operation.kind) {
         "replacement" -> info.operation.stage == "LISTED"
         "deletion" -> info.operation.stage == "DELETED"
+        "activation" -> info.operation.stage == "ACTIVATED"
         else -> false
     }
 
-internal fun operationDialogTitle(info: ReplacementDialogInfo): String =
-    if (info.operation.kind == "deletion") "删除表盘" else "替换表盘"
+internal fun operationDialogTitle(info: ReplacementDialogInfo): String = when(info.operation.kind) {
+    "deletion" -> "删除表盘"
+    "activation" -> "启用表盘"
+    else -> "替换表盘"
+}
 
 internal fun operationDialogStatusText(info: ReplacementDialogInfo): String = when {
-    replacementDialogSucceeded(info) -> if (info.operation.kind == "deletion") "表盘已删除" else "表盘已替换"
-    info.operation.stage == "CANCELLED" -> if (info.operation.kind == "deletion") "删除已取消" else "替换已取消"
+    replacementDialogSucceeded(info) -> when(info.operation.kind) { "deletion" -> "表盘已删除"; "activation" -> "表盘已启用"; else -> "表盘已替换" }
+    info.operation.stage == "CANCELLED" -> when(info.operation.kind) { "deletion" -> "删除已取消"; "activation" -> "启用已取消"; else -> "替换已取消" }
     else -> info.operation.detail.ifBlank { info.operation.stage.ifBlank {
-        if (info.operation.kind == "deletion") "等待删除状态" else "等待替换状态"
+        when(info.operation.kind) { "deletion" -> "等待删除状态"; "activation" -> "等待启用状态"; else -> "等待替换状态" }
     } }
 }
 
@@ -86,8 +90,11 @@ internal fun ReplacementProgressDialog(state: AppUiState, actions: AppActions) {
         fun dismiss() {
             val current = latestState
             if (current.prompt == null && !current.needsPin && replacementDialogCanDismiss(owner.get(), info, current.operationDialog)) {
-                if (info.operation.kind == "deletion") latestActions.dismissDeletionResult(info.token)
-                else latestActions.dismissReplacementResult(info.token)
+                when(info.operation.kind) {
+                    "deletion" -> latestActions.dismissDeletionResult(info.token)
+                    "activation" -> latestActions.dismissActivationResult(info.token)
+                    else -> latestActions.dismissReplacementResult(info.token)
+                }
             }
         }
         Dialog(

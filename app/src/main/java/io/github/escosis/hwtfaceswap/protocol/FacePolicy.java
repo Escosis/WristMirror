@@ -25,13 +25,17 @@ public final class FacePolicy {
     private static boolean expand(TlvView.Face face,long value) {
         return face!=null && face.expandType!=null && face.expandType.longValue()==value;
     }
+    /** 官方两套 27/02 接收模型对缺失 07 使用 int 默认 0；只派生业务值，不改写原始 null。 */
+    private static long effectiveExpandType(TlvView.Face face) {
+        return face.expandType==null?0L:face.expandType.longValue();
+    }
 
     /** 即使条目受保护、属于特殊类型或不可选择，也按实际当前位标记。 */
     public static boolean current(TlvView.Face face) { return has(face,CURRENT); }
 
     /**
-     * 仅选择已有的、非预置且可删除的普通表盘；不根据缺失或未知的 expand 枚举
-     * 推断为普通表盘，贴纸仅由 expand==5 识别。
+     * 仅选择已有的、非预置且可删除的普通表盘；可选 07 缺失时采用官方业务默认 0，
+     * 原始缺失值仍保持 null。显式非零/未知 expand 不放行，贴纸由 expand==5 识别。
      * 未知原始高位、试用及其他特殊配置路径均禁用。
      * 这不代表预置、试用或未知条目在所有固件上都无法替换。
      */
@@ -39,7 +43,7 @@ public final class FacePolicy {
         if(!typeObserved(face) || !face.validResource())return false;
         long type=face.type.longValue();
         if((type&~KNOWN_RAW_BITS)!=0 || (type&SUPPORT_DELETE)==0 || (type&INELIGIBLE_BITS)!=0)return false;
-        return face.expandType!=null && face.expandType.longValue()==0;
+        return effectiveExpandType(face)==0;
     }
 
     /**
@@ -56,7 +60,7 @@ public final class FacePolicy {
         if(expand(face,EXPAND_STICKER))special="趣味贴纸";
         if(special!=null)return special;
         if(!typeObserved(face) || (face.type.longValue()&~KNOWN_RAW_BITS)!=0)return "类型未确认";
-        if(face.expandType==null || face.expandType.longValue()!=0)return "扩展类型未确认";
+        if(effectiveExpandType(face)!=0)return "扩展类型未确认";
         if(has(face,TRIAL))return "试用表盘";
         if(has(face,PRESET))return "预置表盘";
         if(!has(face,SUPPORT_DELETE))return "不可删除普通表盘";

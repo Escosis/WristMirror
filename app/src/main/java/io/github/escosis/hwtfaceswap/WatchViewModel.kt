@@ -57,6 +57,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private var appliedOperationRevision = -1L
     private var appliedReplacementDialogRevision = -1L
     private var appliedDeletionDialogRevision = -1L
+    private var appliedActivationDialogRevision = -1L
     private var removalRevision = -1L
     private var removalToken: Long? = null
     private var removalUiAddress: String? = null
@@ -251,13 +252,15 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private fun operationLabel(kind: String, stage: String, active: Boolean, failed: Boolean): String = when(stage) {
         "LISTED" -> if(!active && !failed) "表盘已替换" else if(failed) "替换结果未确认" else "正在核对替换结果"
         "DELETED" -> if(!active && !failed) "表盘已删除" else if(failed) "删除结果未确认" else "正在核对删除结果"
+        "ACTIVATED" -> if(!active && !failed) "表盘已启用" else if(failed) "启用结果未确认" else "正在核对启用结果"
         "NO_TRANSFER" -> "设备未要求文件，本次未传输"
-        "PRECHECK_FAILED" -> if(kind == "deletion") "删除未开始，尚未向手表发送指令" else "替换未开始，尚未向手表发送指令"
-        "FAILED", "TIMED_OUT", "CANCELLED" -> "操作未可靠完成，请重新连接并查询"
+        "PRECHECK_FAILED" -> if(kind == "deletion") "删除未开始，尚未向手表发送指令" else if(kind == "activation") "启用未开始，请刷新后重试" else "替换未开始，尚未向手表发送指令"
+        "TIMED_OUT" -> "操作超时，请重新连接并查询"
+        "FAILED", "CANCELLED" -> "操作未可靠完成，请重新连接并查询"
         "WAIT_OPERATION", "WAIT_DEVICE" -> "等待设备接受回执"
         "TRANSFERRING" -> "传输原始内容"
         "WAIT_REPORT", "WAIT_POST" -> "等待手表报告与应用确认"
-        "WAIT_LIST" -> if(kind == "deletion") "核对删除后的两次新列表" else "核对新版本列表"
+        "WAIT_LIST" -> if(kind == "deletion") "核对删除后的两次新列表" else if(kind == "activation") "核对当前表盘" else "核对新版本列表"
         else -> stage
     }
     private fun replacementIdentityMatches(dialog: ReplacementDialogInfo?, identity: WatchfaceManager.ReplacementIdentity?): Boolean =
@@ -266,8 +269,11 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private fun deletionIdentityMatches(dialog: ReplacementDialogInfo?, identity: WatchfaceManager.DeletionIdentity?): Boolean =
         dialog != null && dialog.operation.kind == "deletion" && identity != null && dialog.token == identity.token && dialog.connectionEpoch == identity.epoch &&
             dialog.targetId == identity.id && dialog.targetVersion == identity.version
-    // 保留旧 helper 名称，让原替换与所有排队/间接操作守卫同时保护删除会话。
-    private fun replacementActive(): Boolean = runtime.snapshot().let { it.replacementDialog?.operation?.active == true || it.deletionDialog?.operation?.active == true }
+    private fun activationIdentityMatches(dialog: ReplacementDialogInfo?, identity: WatchfaceManager.ActivationIdentity?): Boolean =
+        dialog != null && dialog.operation.kind == "activation" && identity != null && dialog.token == identity.token && dialog.connectionEpoch == identity.epoch &&
+            dialog.targetId == identity.id && dialog.targetVersion == identity.version
+    // 保留旧 helper 名称，让所有排队/间接操作守卫同时保护三种操作。
+    private fun replacementActive(): Boolean = runtime.snapshot().let { it.replacementDialog?.operation?.active == true || it.deletionDialog?.operation?.active == true || it.activationDialog?.operation?.active == true }
     private fun replacementDialog(s: AppRuntime.Snapshot): ReplacementDialogInfo? {
         val dialog = s.replacementDialog ?: return null
         if(!replacementIdentityMatches(dialog, s.replacementDialogIdentity)) return null
@@ -288,16 +294,26 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             else operationLabel(operation.kind, operation.stage, operation.active, operation.failed)
         return dialog.copy(fileName = "", operation = operation.copy(detail = detail), interruptRequested = false)
     }
+    private fun activationDialog(s: AppRuntime.Snapshot): ReplacementDialogInfo? {
+        val dialog = s.activationDialog ?: return null
+        if(!activationIdentityMatches(dialog, s.activationDialogIdentity)) return null
+        val operation = dialog.operation
+        val detail = if(operation.stage == "PRECHECK_FAILED") activationError(operation.detail)
+            else operationLabel(operation.kind, operation.stage, operation.active, operation.failed)
+        return dialog.copy(fileName = "", operation = operation.copy(detail = detail), interruptRequested = false)
+    }
     private fun apply(s: AppRuntime.Snapshot) {
         val current = runtime.snapshot()
         if(s.epoch != runtime.connection.epoch() || s.epoch != current.epoch ||
-            s.operationRevision != current.operationRevision || s.replacementDialogRevision != current.replacementDialogRevision || s.deletionDialogRevision != current.deletionDialogRevision ||
+            s.operationRevision != current.operationRevision || s.replacementDialogRevision != current.replacementDialogRevision || s.deletionDialogRevision != current.deletionDialogRevision || s.activationDialogRevision != current.activationDialogRevision ||
             s.replacementIdentity !== current.replacementIdentity || s.replacementDialogIdentity !== current.replacementDialogIdentity ||
             s.deletionIdentity !== current.deletionIdentity || s.deletionDialogIdentity !== current.deletionDialogIdentity ||
-            s.operationRevision < appliedOperationRevision || s.replacementDialogRevision < appliedReplacementDialogRevision || s.deletionDialogRevision < appliedDeletionDialogRevision) return
+            s.activationIdentity !== current.activationIdentity || s.activationDialogIdentity !== current.activationDialogIdentity ||
+            s.operationRevision < appliedOperationRevision || s.replacementDialogRevision < appliedReplacementDialogRevision || s.deletionDialogRevision < appliedDeletionDialogRevision || s.activationDialogRevision < appliedActivationDialogRevision) return
         appliedOperationRevision = s.operationRevision
         appliedReplacementDialogRevision = s.replacementDialogRevision
         appliedDeletionDialogRevision = s.deletionDialogRevision
+        appliedActivationDialogRevision = s.activationDialogRevision
         if(queuedConnectEpoch != null && queuedConnectEpoch != s.epoch) queuedConnectEpoch = null
         val address = SavedWatchStore.canonicalAddress(runtime.connection.address())
         if(removalBlocks(address) && (s.ready || s.connecting)) return
@@ -314,7 +330,8 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         val queuedStart = startingOperation
         val replacement = replacementDialog(s)
         val deletion = deletionDialog(s)
-        val dialog = replacement ?: deletion
+        val activation = activationDialog(s)
+        val dialog = replacement ?: deletion ?: activation
         val op = when {
             preparing -> OperationInfo("source", "PREPARING", "读取并冻结本地 HWT", null, true, false)
             queuedStart != null -> OperationInfo(queuedStart.kind, "WAIT_OPERATION", if(queuedStart.kind == "deletion") "正在开始删除" else "正在开始替换", null, true, false)
@@ -332,11 +349,12 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             batteryPercent = s.batteryPercent, freeMemoryBytes = s.freeMemoryBytes,
             width = s.width, height = s.height, capability = s.capability,
             faces = faces, listReady = s.listReady, listRefreshing = s.listRefreshing,
-            selectedId = if(s.listReady) desiredId else old.selectedId, operation = op, replacementDialog = replacement, deletionDialog = deletion, needsPin = s.needsPin, pinMessage = s.pinMessage,
+            selectedId = if(s.listReady) desiredId else old.selectedId, operation = op, replacementDialog = replacement, deletionDialog = deletion, activationDialog = activation, needsPin = s.needsPin, pinMessage = s.pinMessage,
             rebindCount = s.rebind, quarantine = (s.failed && !s.ready) || runtime.watchfaces.reconnectRequired(s.epoch),
             statusMessage = when {
                 s.kind == "replacement" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> replacementError(s.message)
                 s.kind == "deletion" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> deletionError(s.message)
+                s.kind == "activation" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> activationError(s.message)
                 s.message.isNotBlank() -> s.message
                 (s.ready && old.phaseCode != "READY") || (old.listRefreshing && !s.listRefreshing) -> ""
                 else -> old.statusMessage
@@ -359,7 +377,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private fun connectionDetail(s: AppRuntime.Snapshot): String = when(s.code) {
         "AGREEMENT_CONFIRM" -> "继续连接初始化"
         "SYSTEM_PAIRING" -> "请在手机和手表确认系统配对"
-        "ACCOUNT" -> "同步华为 ID"
+        "ACCOUNT" -> "同步内部华为 ID"
         "PIN_REQUEST" -> "请求手表配对信息"
         "PIN_INPUT" -> "输入手表显示的配对码"
         "BOND_PARAMS" -> "读取协议绑定参数"
@@ -702,9 +720,16 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         "SELECTED_CONNECTION_CHANGED" -> "连接已变化，尚未发送删除指令。请在当前手表重新选择。"
         else -> "删除未开始，尚未发送指令：$code"
     }
+    private fun activationError(code: String): String = when(code) {
+        "FRESH_DEVICE_LIST_REQUIRED" -> "列表已过期或仍在查询，请刷新后重新启用"
+        "SELECTED_FACE_CHANGED", "SELECTED_ID_NOT_UNIQUE" -> "所选表盘或原版本已变化，请刷新并重新选择"
+        "SELECTED_CONNECTION_CHANGED" -> "连接已变化，请在当前手表重新选择"
+        else -> "启用未开始：$code"
+    }
     private fun runtimeError(kind: String, stage: String, code: String): String {
         if(kind == "replacement" && stage == "PRECHECK_FAILED") return replacementError(code)
         if(kind == "deletion" && stage == "PRECHECK_FAILED") return deletionError(code)
+        if(kind == "activation" && stage == "PRECHECK_FAILED") return activationError(code)
         return when(code) {
             "WATCHFACE_OPERATION_BUSY", "WAIT_FOR_CURRENT_OPERATION_OR_QUERY" -> "请等待当前操作或查询完成"
             "CONNECT_AND_AUTHENTICATE_FIRST" -> "请先连接手表后重试"
@@ -742,6 +767,16 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!s.listReady || !runtime.watchfaces.deletionListFresh(epoch)) throw Core.Fault("FRESH_DEVICE_LIST_REQUIRED")
         val actual = s.faces.filter { it.id == face.id }.singleOrNull() ?: throw Core.Fault("SELECTED_ID_NOT_UNIQUE")
         if(actual.version != face.version || actual.type != face.type || actual.expandType != face.expandType || !FacePolicy.eligible(actual)) throw Core.Fault("SELECTED_FACE_CHANGED")
+        return actual
+    }
+    private fun currentActivationFace(face: TlvView.Face, epoch: Long): TlvView.Face {
+        val snapshot = runtime.snapshot()
+        if(closed || removalWorking() || removalBlocks(runtime.connection.address()) || epoch != runtime.connection.epoch() || snapshot.epoch != epoch ||
+            !runtime.connection.ready() || !snapshot.ready || mutable.value.selectedDeviceAddress?.equals(runtime.connection.address(), true) != true) throw Core.Fault("SELECTED_CONNECTION_CHANGED")
+        if(mutable.value.selectedId != face.id) throw Core.Fault("SELECTED_FACE_CHANGED")
+        if(!snapshot.listReady || !runtime.watchfaces.replacementListFresh(epoch)) throw Core.Fault("FRESH_DEVICE_LIST_REQUIRED")
+        val actual = snapshot.faces.filter { it.id == face.id }.singleOrNull() ?: throw Core.Fault("SELECTED_ID_NOT_UNIQUE")
+        if(actual.version != face.version || !FacePolicy.eligible(actual)) throw Core.Fault("SELECTED_FACE_CHANGED")
         return actual
     }
     private fun currentPickFace(target: Pick): TlvView.Face {
@@ -793,7 +828,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
                     source = imported; sourcePayload = payload
                     old?.let(::cleanAsync)
                     runtime.logs.record("SOURCE_IMPORTED", "bytes=${payload.size} sha256=${payload.hash} source_sha256=${imported.sourceHash} xml_not_rewritten=true no_command_sent=true")
-                    mutable.update { it.copy(source = SourceInfo(imported.title, filename, imported.original.length(), payload.size, imported.xmlVersion, payload.hash), operation = OperationInfo()) }
+                    mutable.update { it.copy(source = SourceInfo(imported.title, filename, imported.original.length(), payload.size, imported.xmlVersion, payload.hash, imported.preview?.absolutePath, imported.previewHash), operation = OperationInfo()) }
                     apply(runtime.snapshot())
                     message("HWT 已就绪，选择目标后点击替换")
                 }
@@ -922,6 +957,45 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             startingOperation = null
             apply(runtime.snapshot())
             throw e
+        }
+    }
+    override fun requestActivation() {
+        if(closed || removalWorking() || removalBlocks(runtime.connection.address()) || preparing || filePickToken != null || startingOperation != null || replacementActive() ||
+            runtime.watchfaces.busy() || mutable.value.prompt != null || mutable.value.needsPin) return
+        var identity: WatchfaceManager.ActivationIdentity? = null
+        try {
+            if(!UiPolicy.canOperateFaces(mutable.value)) throw Core.Fault("FRESH_DEVICE_LIST_REQUIRED")
+            val epoch = runtime.connection.epoch()
+            val face = selected() ?: throw Core.Fault("SELECT_EXISTING_ORDINARY_FACE")
+            val actual = currentActivationFace(face, epoch)
+            if(FacePolicy.current(actual)) { message("该表盘正在使用"); return }
+            val request = runtime.watchfaces.newActivationRequest(actual, epoch)
+            identity = request.identity
+            val title = mutable.value.faces.singleOrNull { it.id == actual.id }?.title ?: actual.id
+            if(!runtime.openActivationDialog(request, title)) throw Core.Fault("WATCHFACE_OPERATION_BUSY")
+            fileOnlyPreview = true
+            apply(runtime.snapshot())
+            runtime.logs.record("ACTIVATE_UI_REQUEST", "id=${actual.id} version=${actual.version} captured_epoch=$epoch token_consumed=true file_budget=0")
+            val current = currentActivationFace(actual, epoch)
+            if(runtime.watchfaces.busy()) throw Core.Fault("WATCHFACE_OPERATION_BUSY")
+            runtime.watchfaces.beginActivation(current, epoch, request)
+        } catch(e: Exception) {
+            val code = Core.code(e)
+            identity?.let { runtime.rejectActivationDialog(it, code) }
+            if(!closed) { apply(runtime.snapshot()); message(activationError(code)) }
+        }
+    }
+    override fun dismissActivationResult(token: Long) {
+        val visible = mutable.value.activationDialog
+        if(closed || !ReplacementDialogPolicy.canDismiss(visible, token)) return
+        val captured = runtime.snapshot(); val identity = captured.activationDialogIdentity ?: return
+        if(!activationIdentityMatches(visible, identity) || !activationIdentityMatches(captured.activationDialog, identity)) return
+        main.post {
+            val current = runtime.snapshot()
+            if(closed || current.activationDialogIdentity !== identity || !activationIdentityMatches(mutable.value.activationDialog, identity) ||
+                !ReplacementDialogPolicy.canDismiss(mutable.value.activationDialog, token) || !activationIdentityMatches(current.activationDialog, identity) ||
+                !ReplacementDialogPolicy.canDismiss(current.activationDialog, token)) return@post
+            runtime.dismissActivationResult(identity);apply(runtime.snapshot())
         }
     }
     override fun requestDeletion() {
