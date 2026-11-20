@@ -65,6 +65,11 @@ public final class WatchfaceManager {
         private final AtomicBoolean submitted=new AtomicBoolean();private final Object previousOwner;
         private ActivationRequest(String id,String version,long epoch,Object previousOwner){identity=new ActivationIdentity(id,version,epoch);this.previousOwner=previousOwner;}
     }
+    /** 删除前置查询只回报创建它的调用者；回调不是全局选中行，也不是线上 nonce。 */
+    public interface DeletionPreparationListener {
+        void onPrepared(TlvView.Face face,long epoch);
+        void onFailure(String code);
+    }
     // 三种操作共用进程令牌计数器，旧结果不能碰巧成为另一种操作的关闭令牌。
     private static final AtomicLong replacementTokens=new AtomicLong(System.nanoTime());
     private volatile Object summaryOwner;
@@ -153,19 +158,35 @@ public final class WatchfaceManager {
         NamesRun(long epoch,List<TlvView.Face> faces,Set<String> known,int language)throws IOException{this.epoch=epoch;sourceFaces=faces;state=new NameQueryState(faces,known);this.language=language;}
     }
     private static final class Query {
-        final long serial,epoch;final Op op;final int generation;
-        Query(long serial,long epoch,Op op){this.serial=serial;this.epoch=epoch;this.op=op;generation=op instanceof Replace?((Replace)op).state.postGeneration:op instanceof Delete?((Delete)op).state.signalGeneration:op instanceof Activate?((Activate)op).state.signalGeneration:0;}
+        final long serial,epoch;final Op op;final int generation;final PreDelete preparation;
+        Query(long serial,long epoch,Op op,PreDelete preparation){this.serial=serial;this.epoch=epoch;this.op=op;this.preparation=preparation;generation=op instanceof Replace?((Replace)op).state.postGeneration:op instanceof Delete?((Delete)op).state.signalGeneration:op instanceof Activate?((Activate)op).state.signalGeneration:0;}
     }
-    private static final class PreDelete {final String id,version;final long epoch;PreDelete(String i,String v,long e){id=i;version=v;epoch=e;}}
+    private static final class PreDelete {
+        final String id,version;final long epoch;final TlvView.Face requested;final DeletionPreparationListener callback;boolean completed;
+        PreDelete(String i,String v,long e,TlvView.Face requested,DeletionPreparationListener callback){id=i;version=v;epoch=e;this.requested=requested;this.callback=callback;}
+    }
+    private void preparationFailed(PreDelete p,String code,boolean publishError){
+        if(p==null||p.completed)return;
+        if(preDelete==p)preDelete=null;
+        p.completed=true;
+        if(p.callback!=null)p.callback.onFailure(code);
+        if(publishError)error(code);
+    }
+    private void preparationReady(PreDelete p,TlvView.Face face){
+        if(p.completed)return;p.completed=true;
+        if(p.callback!=null)p.callback.onPrepared(face,p.epoch);
+        else if(listener!=null)listener.onPreparedDeletion(face,p.epoch);
+    }
     public void authenticated(long epoch){connection.execute(()->{
         if(epoch!=connection.epoch())return;
         if(active!=null){if(active.epoch==epoch)return;retire(active,"CONNECTION_REPLACED");}
+        preparationFailed(preDelete,"DELETE_CONNECTION_CHANGED",false);
         cancelNames();summaryOwner=null;shownReplacementRequest=null;shownDeletionRequest=null;shownActivationRequest=null;reconnectEpoch=-1;latest=Collections.emptyList();names.clear();listAt=0;listEpoch=epoch;query=null;preDelete=null;busy=false;refreshActor();
     });}
     public void closed(long closedEpoch,String reason){connection.execute(()->{
         if(namesRun!=null&&namesRun.epoch==closedEpoch)cancelNames();
         if(query!=null&&query.epoch==closedEpoch)query=null;
-        if(preDelete!=null&&preDelete.epoch==closedEpoch)preDelete=null;
+        if(preDelete!=null&&preDelete.epoch==closedEpoch)preparationFailed(preDelete,"DELETE_CONNECTION_CHANGED",false);
         if(listEpoch==closedEpoch)listAt=0;
         if(active!=null&&active.epoch==closedEpoch)retire(active,"CONNECTION_CLOSED_"+reason);
         publishFaces();
@@ -236,16 +257,20 @@ public final class WatchfaceManager {
         }else if(listener!=null)listener.onActivationRequestFinished(request.identity,"PRECHECK_FAILED",code,true);
     }
     private void validate(TlvView.Face face,long epoch,long maxAge,boolean strictObservation)throws IOException{
+        validate(face,epoch,maxAge,strictObservation,false);
+    }
+    /** activation=true 只供 beginActivation；覆盖、删除与删除前检仍使用 eligible。 */
+    private void validate(TlvView.Face face,long epoch,long maxAge,boolean strictObservation,boolean activation)throws IOException{
         if(!connection.ready()||connection.epoch()!=epoch)throw new Core.Fault("SELECTED_CONNECTION_CHANGED");
         if(reconnectRequired(epoch))throw new Core.Fault("RECONNECT_AFTER_UNCERTAIN_FILE_RESULT");
-        if(!FacePolicy.eligible(face))throw new Core.Fault("SELECT_EXISTING_ORDINARY_FACE");
+        if(!(activation?FacePolicy.canActivate(face):FacePolicy.eligible(face)))throw new Core.Fault(activation?"SELECT_EXISTING_ACTIVATABLE_FACE":"SELECT_EXISTING_ORDINARY_FACE");
         long age=SystemClock.elapsedRealtime()-listAt;
         if(listAt==0||listEpoch!=epoch||age<0||age>maxAge||query!=null)throw new Core.Fault("FRESH_DEVICE_LIST_REQUIRED");
         int count=0;
         for(TlvView.Face x:latest)if(face.id.equals(x.id)){
             count++;
-            // 普通表盘的正在使用位变化（4 与 5 互换）不改变替换目标身份。
-            if(!face.version.equals(x.version)||!FacePolicy.eligible(x)||(strictObservation&&(!Objects.equals(face.type,x.type)||!Objects.equals(face.expandType,x.expandType))))throw new Core.Fault("SELECTED_FACE_CHANGED");
+            // 普通表盘的正在使用位变化（4 与 5 互换）不改变旧替换入口的目标身份。
+            if(!face.version.equals(x.version)||!(activation?FacePolicy.canActivate(x):FacePolicy.eligible(x))||(strictObservation&&(!Objects.equals(face.type,x.type)||!Objects.equals(face.expandType,x.expandType))))throw new Core.Fault("SELECTED_FACE_CHANGED");
         }
         if(count!=1)throw new Core.Fault("SELECTED_ID_NOT_UNIQUE");
     }
@@ -287,10 +312,25 @@ public final class WatchfaceManager {
             r.state.cancel();finish(r);
         });
     }
-    public void prepareDeletion(String id,String version,long epoch){connection.post(()->{
-        if(busy()||query!=null){error("WAIT_FOR_CURRENT_OPERATION_OR_QUERY");return;}
-        try{if(!connection.ready()||connection.epoch()!=epoch)throw new Core.Fault("SELECTED_CONNECTION_CHANGED");if(reconnectRequired(epoch))throw new Core.Fault("RECONNECT_AFTER_UNCERTAIN_FILE_RESULT");preDelete=new PreDelete(id,version,epoch);listAt=0;requestList(null);}
-        catch(IOException e){preDelete=null;error(Core.code(e));}
+    /** 旧调用者保留原监听路径；逐卡调用者必须使用携带请求行与私有回调的重载。 */
+    public void prepareDeletion(String id,String version,long epoch){prepareDeletion(new PreDelete(id,version,epoch,null,null));}
+    public void prepareDeletion(TlvView.Face face,long epoch,DeletionPreparationListener callback){
+        Objects.requireNonNull(callback);
+        prepareDeletion(new PreDelete(face==null?"":face.id,face==null?"":face.version,epoch,face,callback));
+    }
+    private void prepareDeletion(PreDelete p){connection.post(()->{
+        if(busy()||query!=null){preparationFailed(p,"WAIT_FOR_CURRENT_OPERATION_OR_QUERY",p.callback==null);return;}
+        try{
+            if(!connection.ready()||connection.epoch()!=p.epoch)throw new Core.Fault("SELECTED_CONNECTION_CHANGED");
+            if(reconnectRequired(p.epoch))throw new Core.Fault("RECONNECT_AFTER_UNCERTAIN_FILE_RESULT");
+            if(p.callback!=null)validate(p.requested,p.epoch,REPLACEMENT_LIST_AGE,true);
+            preDelete=p;listAt=0;requestList(null);
+        }catch(Exception e){
+            String code=e instanceof SecurityException?"BLUETOOTH_PERMISSION_REQUIRED":Core.code(e);
+            Query failedQuery=query;
+            if(failedQuery!=null&&failedQuery.preparation==p){query=null;listAt=0;if(preDelete==p)preDelete=null;publishFaces();}
+            preparationFailed(p,code,p.callback==null);
+        }
     });}
     /** 旧删除入口仍走相同的对象/代次门，不提供删除中断或文件路径。 */
     public void beginDeletion(TlvView.Face face,long epoch){beginDeletion(face,epoch,newDeletionRequest(face,epoch));}
@@ -323,7 +363,7 @@ public final class WatchfaceManager {
             try{
                 ActivationIdentity identity=request.identity;
                 if(face==null||identity.epoch!=epoch||!Objects.equals(identity.id,face.id)||!Objects.equals(identity.version,face.version))throw new Core.Fault("SELECTED_CONNECTION_CHANGED");
-                validate(face,epoch,REPLACEMENT_LIST_AGE,false);
+                validate(face,epoch,REPLACEMENT_LIST_AGE,true,true);
                 Activate a=new Activate(face,epoch,request);start(a);
                 log.record("ACTIVATE_SEND_OPERATION","id="+a.id+" version="+a.version+" op=1 original_version=true file_budget=0");
                 connection.sendControl(0x27,3,Wire.operation(a.id,a.version));show(a);timer(a);
@@ -354,12 +394,12 @@ public final class WatchfaceManager {
             if(op instanceof Activate)throw new Core.Fault("ACTIVATION_LIST_QUERY_BUDGET_EXHAUSTED");
             return; // 等待既有的后置或总超时，不自行推断最终结果。
         }
-        Query q=new Query(++serial,connection.epoch(),op);query=q;publishFaces();
+        Query q=new Query(++serial,connection.epoch(),op,op==null?preDelete:null);query=q;publishFaces();
         try{connection.sendControl(0x27,2,Wire.list(2));}catch(IOException e){if(query==q)query=null;listAt=0;publishFaces();throw e;}
         log.record("LIST_QUERY","serial="+q.serial+" generation="+q.generation+" local_not_wire_nonce=true");
         connection.delay(()->{if(query==q&&q.epoch==connection.epoch()){
             query=null;listAt=0;if(active==op&&op!=null)failActive("LIST_QUERY_TIMEOUT",null);
-            else{preDelete=null;error("LIST_QUERY_TIMEOUT_RECONNECT");connection.protocolFailure("LIST_QUERY_TIMEOUT");}publishFaces();
+            else{preparationFailed(q.preparation,"LIST_QUERY_TIMEOUT_RECONNECT",false);error("LIST_QUERY_TIMEOUT_RECONNECT");connection.protocolFailure("LIST_QUERY_TIMEOUT");}publishFaces();
         }},15000);
     }
     public void packet(long epoch,int service,int command,byte[] body,boolean encrypted){
@@ -418,7 +458,7 @@ public final class WatchfaceManager {
                 return;
             }
             if(owned&&active==op)failActive(Core.code(e),null);else{
-                error(Core.code(e));if(service==0x27&&command==2&&query!=null&&query.epoch==epoch){query=null;preDelete=null;listAt=0;publishFaces();}
+                error(Core.code(e));if(service==0x27&&command==2&&query!=null&&query.epoch==epoch){Query failedQuery=query;query=null;preparationFailed(failedQuery.preparation,Core.code(e),false);listAt=0;publishFaces();}
             }
         }
     }
@@ -431,11 +471,15 @@ public final class WatchfaceManager {
         publishFaces();expireObservation(faces,listAt,epoch);
         log.record("RESOURCE_LIST","entries="+faces.size()+" serial="+q.serial+" generation="+q.generation);
         for(TlvView.Face f:faces)log.record("LIST_ENTRY","id="+f.id+" version="+f.version+" type="+f.type+" expand="+f.expandType);
-        if(preDelete!=null){
-            PreDelete p=preDelete;preDelete=null;if(p.epoch!=epoch)throw new Core.Fault("DELETE_CONNECTION_CHANGED");
-            TlvView.Face selected=null;int count=0;for(TlvView.Face f:faces)if(p.id.equals(f.id)){selected=f;count++;}
-            if(count!=1||selected==null||!p.version.equals(selected.version)||!FacePolicy.eligible(selected))throw new Core.Fault("DELETE_PREPARATION_CHANGED");
-            if(listener!=null)listener.onPreparedDeletion(selected,epoch);
+        if(q.preparation!=null&&preDelete==q.preparation){
+            PreDelete p=q.preparation;preDelete=null;
+            try{
+                if(p.epoch!=epoch)throw new Core.Fault("DELETE_CONNECTION_CHANGED");
+                TlvView.Face requested=null;int count=0;for(TlvView.Face f:faces)if(p.id.equals(f.id)){requested=f;count++;}
+                if(count!=1||requested==null||!p.version.equals(requested.version)||!FacePolicy.eligible(requested)||
+                    (p.requested!=null&&(!Objects.equals(p.requested.type,requested.type)||!Objects.equals(p.requested.expandType,requested.expandType))))throw new Core.Fault("DELETE_PREPARATION_CHANGED");
+                preparationReady(p,requested);
+            }catch(IOException e){preparationFailed(p,Core.code(e),false);throw e;}
         }
         if(q.op!=null&&q.op==active){Op op=q.op;if(op instanceof Replace){
             Replace r=(Replace)op;r.state.list(faces,q.generation,true);show(r);finish(r);

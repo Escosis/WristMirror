@@ -1,6 +1,6 @@
 package io.github.escosis.hwtfaceswap.ui
 
-import android.app.Activity
+import android.content.Context
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -12,7 +12,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -26,8 +28,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -41,32 +43,48 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.WindowInfo
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.escosis.hwtfaceswap.AppActions
 import io.github.escosis.hwtfaceswap.AppUiState
 import io.github.escosis.hwtfaceswap.FaceItem
 import io.github.escosis.hwtfaceswap.SourceInfo
 import io.github.escosis.hwtfaceswap.UiPolicy
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.squircle.squircleClip
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+
+// Referential snapshots also replace equal-valued objects, so old callbacks cannot retain a new
+// actions/context owner merely because its equals() implementation says the objects are equal.
+private class FacesScreenRenderFrame(
+    val state: AppUiState,
+    val actions: AppActions,
+    val context: Context,
+    val lifecycleOwner: LifecycleOwner,
+    val windowInfo: WindowInfo,
+    val pickHwt: () -> Unit,
+)
+
+private class SourceToggleFrame(val source: SourceInfo?, val expanded: Boolean)
+private class FaceExpansionFrame(val face: FaceItem, val epoch: Long, val expanded: Boolean)
+private class FaceViewportFrame(val insets: PaddingValues, val density: Density)
 
 @Composable
 internal fun FacesScreen(
@@ -77,69 +95,108 @@ internal fun FacesScreen(
     scrollModifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val latestState by rememberUpdatedState(state)
-    val latestActions by rememberUpdatedState(actions)
-    val latestContext by rememberUpdatedState(context)
-    val latestWindowInfo by rememberUpdatedState(LocalWindowInfo.current)
-    val latestLifecycleOwner by rememberUpdatedState(LocalLifecycleOwner.current)
-    val activationCoordinates = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val windowInfo = LocalWindowInfo.current
+    val renderFrame = FacesScreenRenderFrame(state, actions, context, lifecycleOwner, windowInfo, onPickHwt)
+    val latestFrame by rememberUpdatedState(renderFrame)
     val owner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
-    DisposableEffect(owner) { onDispose { owner.set(false); activationCoordinates[0] = null } }
+    val host = remember(owner) {
+        FaceActionHost(
+            state = { latestFrame.state }, actions = { latestFrame.actions },
+            context = { latestFrame.context }, lifecycleOwner = { latestFrame.lifecycleOwner },
+            windowInfo = { latestFrame.windowInfo }, pickHwt = { latestFrame.pickHwt },
+            ownerCurrent = { owner.get() },
+        )
+    }
+    val viewportCoordinates = remember(owner) { arrayOfNulls<LayoutCoordinates>(1) }
+    val viewportFrame = FaceViewportFrame(insets, LocalDensity.current)
+    val latestViewportFrame by rememberUpdatedState(viewportFrame)
+    val readGeometry: (LayoutCoordinates) -> CardExpansionGeometry? = remember(owner) {
+        geometry@{ card ->
+            val viewport = viewportCoordinates[0]
+            if (!owner.get() || !card.isAttached || viewport?.isAttached != true) return@geometry null
+            val visible = viewport.boundsInWindow(clipBounds = true)
+            if (visible.isEmpty) return@geometry null
+            val rawViewport = viewport.boundsInWindow(clipBounds = false)
+            val latest = latestViewportFrame
+            // Miuix Scaffold 的内容原点仍为(0,0)，PaddingValues 内的真实顶/底栏高度需扣除。
+            val topInset = with(latest.density) { latest.insets.calculateTopPadding().toPx() }
+            val bottomInset = with(latest.density) { latest.insets.calculateBottomPadding().toPx() }
+            val cardTop = card.boundsInWindow(clipBounds = false).top
+            CardExpansionGeometry(
+                width = card.size.width,
+                cardTop = cardTop,
+                cardBottom = cardTop + card.size.height,
+                viewportTop = maxOf(visible.top, rawViewport.top + topInset),
+                viewportBottom = minOf(visible.bottom, rawViewport.bottom - bottomInset),
+                edgeMargin = with(latest.density) { 12.dp.toPx() },
+            )
+        }
+    }
+    DisposableEffect(owner) {
+        onDispose {
+            owner.set(false)
+            viewportCoordinates[0] = null
+        }
+    }
+    val listState = rememberLazyListState()
+    val expansionScroll = rememberCardExpansionScroll(listState)
+    // Validation only cancels invalid in-flight intents; refresh/name/state updates never create one.
+    LaunchedEffect(renderFrame) { expansionScroll.validate() }
     // 只随同一连接的刷新开始触发一次；型号回显、进度等普通重组不会重复提示。
     LaunchedEffect(state.connectionEpoch, state.listRefreshing) {
-        val current = latestState
+        val current = host.state()
         if (owner.get() && current.connectionEpoch == state.connectionEpoch && UiPolicy.showFaceRefreshNotice(current)) {
             Toast.makeText(context, "正在刷新表盘列表，请稍候", Toast.LENGTH_SHORT).show()
         }
     }
-    val selectedFace = state.faces.singleOrNull { it.id == state.selectedId }
-    val available = UiPolicy.canOperateFaces(state)
-    val canChange = available && selectedFace?.selectable == true
-    val busy = state.operation.active || state.operationDialog != null || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin
     LazyColumn(
-        modifier = scrollModifier.fillMaxSize().consumeWindowInsets(insets).selectableGroup(),
+        state = listState,
+        modifier = scrollModifier.fillMaxSize().consumeWindowInsets(insets)
+            .onGloballyPositioned { if (owner.get()) viewportCoordinates[0] = it }
+            .cancelCardExpansionOnUserDrag(expansionScroll),
         contentPadding = pageContentPadding(insets),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item(key = "face_and_file_actions") {
-            Card(
-                Modifier.fillMaxWidth(),
-                insideMargin = PaddingValues(vertical = 16.dp),
-            ) {
-                Text(
-                    "目标表盘：${(selectedFace?.title ?: "未选择").uiText()}",
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(12.dp))
-                // 标题与动画详情共用完整源快照。换源即销毁旧子树，不把旧退出内容挂在新文件标题下。
+            Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(vertical = 16.dp)) {
+                // 标题与动画详情共用完整源快照。换源即销毁旧子树，不把旧退出预览挂在新标题下。
                 key(state.source) {
                     val sourceSnapshot = remember { state.source }
                     val sourceOwner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
                     DisposableEffect(sourceOwner) { onDispose { sourceOwner.set(false) } }
-                    var showSource by rememberSaveable(sourceSnapshot) { mutableStateOf(false) }
+                    var showSource by rememberSaveable(sourceSnapshot) { mutableStateOf(sourceSnapshot != null) }
                     val renderedExpanded = showSource
                     val sourceTransition = remember { MutableTransitionState(false) }
                     sourceTransition.targetState = showSource && sourceSnapshot != null
-                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val toggleFrame = SourceToggleFrame(sourceSnapshot, renderedExpanded)
+                    val interaction = rememberFaceUiInteraction(
+                        toggleFrame, host, actions, ownerCurrent = { sourceOwner.get() },
+                        intentCurrent = {
+                            sourceToggleCurrent(toggleFrame.source, host.state().source, toggleFrame.expanded, showSource)
+                        },
+                    )
+                    val toggleSource: () -> Unit = {
+                        if (interaction.guard().allowsInteraction) {
+                            expansionScroll.cancelAll()
+                            showSource = !toggleFrame.expanded
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().then(interaction.modifier)
+                            .then(if (sourceSnapshot != null) Modifier.clickable(role = Role.Button, onClick = toggleSource) else Modifier)
+                            .padding(start = 16.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Column(Modifier.weight(1f)) {
-                            Text(if(sourceSnapshot == null) "HWT 文件：未选择" else "HWT 文件：", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Text(if (sourceSnapshot == null) "HWT 文件：未选择" else "HWT 文件：", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             sourceSnapshot?.let { file ->
                                 Text(file.fileName.uiText(), fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.height(6.dp))
                                 MutedText(formatBytes(file.payloadBytes.toLong()))
                             }
                         }
-                        if(sourceSnapshot != null) {
-                            ExpandButton(showSource, "文件信息", onClick = {
-                                if(owner.get() && sourceOwner.get() && sourceToggleCurrent(
-                                    sourceSnapshot, latestState.source, renderedExpanded, showSource,
-                                )) showSource = !renderedExpanded
-                            })
-                        }
+                        if (sourceSnapshot != null) ExpandButton(showSource, "文件信息", onClick = toggleSource)
                     }
                     AnimatedVisibility(
                         visibleState = sourceTransition,
@@ -155,55 +212,14 @@ internal fun FacesScreen(
                     }
                 }
                 Spacer(Modifier.height(16.dp))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionButton(
-                        text = "选择 HWT", onClick = onPickHwt,
-                        modifier = Modifier.weight(1f), enabled = UiPolicy.canChooseHwt(state),
-                    )
-                    ActionButton(
-                        text = "替换表盘", onClick = actions::requestReplacement,
-                        modifier = Modifier.weight(1f), primary = true, enabled = canChange && state.source != null,
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionButton(
-                        text = if(state.listRefreshing) "正在刷新" else "刷新列表",
-                        onClick = actions::refreshFaces, modifier = Modifier.weight(1f),
-                        enabled = state.connected && !state.listRefreshing && !state.quarantine && !busy,
-                    )
-                    ActionButton(
-                        text = "启用表盘", onClick = {
-                            val placed = activationCoordinates[0]
-                            val activity = latestContext as? Activity
-                            if(owner.get() && latestActions === actions && latestWindowInfo.isWindowFocused &&
-                                latestLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
-                                activity?.isFinishing != true && activity?.isDestroyed != true &&
-                                placed?.isAttached == true && !placed.boundsInWindow(clipBounds = true).isEmpty &&
-                                activationButtonCurrent(selectedFace, state.connectionEpoch, latestState)) latestActions.requestActivation()
-                        },
-                        modifier = Modifier.weight(1f).onGloballyPositioned { activationCoordinates[0] = it },
-                        primary = true, enabled = canChange && selectedFace?.current == false,
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionButton(
-                        text = "清除导入缓存", onClick = actions::clearCache,
-                        modifier = Modifier.weight(1f), enabled = !busy,
-                    )
-                    ActionButton(
-                        text = "删除表盘", onClick = actions::requestDeletion,
-                        modifier = Modifier.weight(1f), destructive = true, enabled = canChange,
-                    )
-                }
+                FacePageActions(state, actions, host, onPickHwt)
             }
         }
-        if(pageOperationCardVisible(state.operation)) {
+        if (pageOperationCardVisible(state.operation)) {
             item(key = "operation") { OperationCard(state.operation) }
         }
         item(key = "list_heading") { SectionHeading("全部表盘（${state.faces.size}）") }
-        if(state.faces.isEmpty()) {
+        if (state.faces.isEmpty()) {
             item(key = "empty") {
                 EmptyCard(
                     title = when {
@@ -211,40 +227,17 @@ internal fun FacesScreen(
                         state.listReady -> "手表返回了空列表"
                         else -> "等待读取表盘"
                     },
-                    message = if(state.connected) "点击刷新，等待手表返回表盘列表。" else "请先前往设备页连接手表。",
+                    message = if (state.connected) "点击刷新，等待手表返回表盘列表。" else "请先前往设备页连接手表。",
                     icon = WatchIcons.Faces,
                 )
             }
         } else {
-            itemsIndexed(state.faces, key = { index, face -> "$index:${face.id}:${face.version}" }) { _, face ->
-                val renderedEpoch = state.connectionEpoch
-                FaceRow(
-                    face = face, epoch = renderedEpoch, selected = state.selectedId == face.id,
-                    enabled = available && face.selectable,
-                    onSelect = {
-                        if(owner.get()) {
-                            val current = latestState
-                            val feedback = faceSelectionFeedback(state) ?: faceSelectionFeedback(current)
-                                ?: if(!face.selectable) "该类型表盘不可替换或删除"
-                                else if(current.connectionEpoch != renderedEpoch || current.faces.count {
-                                    it.id == face.id && it.version == face.version && it.selectable
-                                } != 1 || current.faces.count { it.id == face.id } != 1) "请刷新表盘列表"
-                                else null
-                            if(feedback != null) Toast.makeText(context, feedback, Toast.LENGTH_SHORT).show()
-                            else actions.selectFace(face.id)
-                        }
-                    },
-                )
+            // Include epoch and index so even a malformed duplicate-ID list has unique owners/keys.
+            itemsIndexed(state.faces, key = { index, face -> "${state.connectionEpoch}:$index:${face.id}:${face.version}" }) { _, face ->
+                FaceRow(face, state.connectionEpoch, state, actions, host, expansionScroll, readGeometry)
             }
         }
     }
-}
-
-internal fun activationButtonCurrent(rendered: FaceItem?, epoch: Long, current: AppUiState): Boolean {
-    if(rendered == null || !rendered.selectable || rendered.current || current.connectionEpoch != epoch ||
-        current.selectedId != rendered.id || !UiPolicy.canOperateFaces(current)) return false
-    val actual = current.faces.singleOrNull { it.id == rendered.id } ?: return false
-    return actual.version == rendered.version && actual.selectable && !actual.current
 }
 
 /** 同一源的旧展开帧不能再次翻转状态；完整元数据改变也视为换源。 */
@@ -255,52 +248,136 @@ private fun sourceToggleCurrent(
     latestExpanded: Boolean,
 ): Boolean = renderedSource != null && renderedSource == latestSource && renderedExpanded == latestExpanded
 
-/** 过期列表仍可点击查看原因，但此路径不会选择条目、刷新或提交表盘操作。 */
-private fun faceSelectionFeedback(state: AppUiState): String? = when {
-    state.unpairWorking || UiPolicy.isUnpairTarget(state, state.deviceAddress) -> "解除配对处理中，请稍候"
-    !state.connected -> "请先前往设备页连接手表"
-    state.quarantine -> "请重新连接后刷新表盘列表"
-    state.operation.active || state.operationDialog != null || state.pickingHwt || state.connecting || state.prompt != null || state.needsPin -> "操作进行中，请保持连接并等待。"
-    state.listRefreshing -> "正在刷新表盘列表，请稍候"
-    !state.listReady -> "请刷新表盘列表"
-    else -> null
-}
-
 @Composable
-private fun FaceRow(face: FaceItem, epoch: Long, selected: Boolean, enabled: Boolean, onSelect: () -> Unit) {
+private fun FaceRow(
+    face: FaceItem,
+    epoch: Long,
+    state: AppUiState,
+    actions: AppActions,
+    host: FaceActionHost,
+    expansionScroll: CardExpansionScrollController,
+    geometryFor: (LayoutCoordinates) -> CardExpansionGeometry?,
+) {
     var expanded by rememberSaveable(epoch, face.id, face.version) { mutableStateOf(false) }
-    val colors = MiuixTheme.colorScheme
-    val selectedVisible = selected && enabled
-    Card(
-        modifier = Modifier.fillMaxWidth()
-            .animateContentSize(tween(160, easing = FastOutSlowInEasing))
-            .squircleClip(cornerRadius = 16.dp)
-            // 禁止选择时保留点击解释，不把灰色卡片偷偷切为选中。
-            .selectable(selectedVisible, enabled = true, role = Role.RadioButton, onClick = onSelect)
-            .semantics { if(!enabled) stateDescription = "不可选择" },
-        cornerRadius = 16.dp,
-        insideMargin = PaddingValues(vertical = 8.dp),
-        colors = CardDefaults.defaultColors(color = if(selectedVisible) colors.tertiaryContainer else colors.surfaceContainer),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                face.title.uiText(), modifier = Modifier.weight(1f),
-                fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = if(enabled) colors.onSurfaceContainer else colors.onSurfaceVariantSummary.copy(alpha = 0.6f),
-            )
-            if(face.current) {
-                Spacer(Modifier.width(8.dp))
-                Text("正在使用", fontSize = 12.sp, color = if(enabled) colors.primary else colors.onSurfaceVariantSummary.copy(alpha = 0.6f))
-            }
-            ExpandButton(expanded, "表盘信息", onClick = { expanded = !expanded })
+    val renderedExpanded = expanded
+    val rowOwner = remember(epoch, face.id, face.version) { java.util.concurrent.atomic.AtomicBoolean(true) }
+    val coordinates = remember(rowOwner) { arrayOfNulls<LayoutCoordinates>(1) }
+    val activeIntent = remember(rowOwner) { arrayOfNulls<CardExpansionIntent>(1) }
+    DisposableEffect(rowOwner) {
+        onDispose {
+            rowOwner.set(false)
+            coordinates[0] = null
+            activeIntent[0] = null
+            expansionScroll.cancel(rowOwner)
         }
-        if(expanded) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
-                ValueRow("版本", face.version.ifBlank { "手表未提供" })
-                ValueRow("ID", face.id)
-                ValueRow("类型", face.kind)
-                if(!face.selectable) MutedText("该类型表盘不可替换或删除")
+    }
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val windowInfo = LocalWindowInfo.current
+    val toggleFrame = FaceExpansionFrame(face, epoch, renderedExpanded)
+    val headerInteraction = rememberFaceUiInteraction(
+        toggleFrame, host, actions, ownerCurrent = { rowOwner.get() },
+        intentCurrent = {
+            toggleFrame.expanded == expanded && FaceCardPolicy.rowCurrent(toggleFrame.face, toggleFrame.epoch, host.state())
+        },
+    )
+    val toggle: () -> Unit = {
+        if (headerInteraction.guard().allowsInteraction) {
+            // 任何新的明确展开/收起操作都让旧自动滚动让出控制，不只取消这一张卡。
+            expansionScroll.cancelAll()
+            if (toggleFrame.expanded) {
+                activeIntent[0] = null
+                expanded = false
+            } else {
+                val placed = coordinates[0]
+                val scrollFrame = CardExpansionPolicy.capture(state, face, epoch)
+                var intent: CardExpansionIntent? = null
+                if (placed?.isAttached == true) {
+                    intent = expansionScroll.begin(
+                        rowOwner, scrollFrame.key, placed.size.width, placed.size.height,
+                        geometry = { coordinates[0]?.takeIf { it.isAttached }?.let(geometryFor) },
+                    ) {
+                        val current = host.state()
+                        val currentPlacement = coordinates[0]
+                        rowOwner.get() && host.ownerCurrent() && activeIntent[0] === intent && expanded &&
+                            CardExpansionPolicy.current(scrollFrame, current) &&
+                            host.actions() === actions && host.context() === context &&
+                            host.lifecycleOwner() === lifecycleOwner && host.windowInfo() === windowInfo &&
+                            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && windowInfo.isWindowFocused &&
+                            currentPlacement?.isAttached == true && !currentPlacement.boundsInWindow(clipBounds = true).isEmpty
+                    }
+                }
+                activeIntent[0] = intent
+                expanded = true
+            }
+        }
+    }
+    val colors = MiuixTheme.colorScheme
+    val renderedIntent = activeIntent[0]
+    // Explicit layout-node boundaries, not observer order on one modifier chain: the outer Box
+    // measures its animated child, while the inner non-animated Card reports the content target.
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { placed ->
+            if (rowOwner.get()) coordinates[0] = placed
+            if (renderedExpanded && expanded && renderedIntent != null && activeIntent[0] === renderedIntent) {
+                expansionScroll.measured(renderedIntent, placed.size.width, placed.size.height)
+            }
+        },
+    ) {
+        Box(
+            Modifier.fillMaxWidth().animateContentSize(
+                animationSpec = tween(160, easing = FastOutSlowInEasing),
+                finishedListener = { initial, target ->
+                    if (renderedExpanded && expanded && renderedIntent != null && activeIntent[0] === renderedIntent && target.height >= initial.height) {
+                        expansionScroll.animationFinished(renderedIntent, target.height)
+                    }
+                },
+            ),
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth().onSizeChanged { target ->
+                    // The real measured target only defines settlement, never the scroll budget.
+                    if (renderedExpanded && expanded && renderedIntent != null && activeIntent[0] === renderedIntent) {
+                        expansionScroll.targetMeasured(renderedIntent, target.width, target.height)
+                    }
+                },
+                cornerRadius = 16.dp,
+                insideMargin = PaddingValues(vertical = 8.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().then(headerInteraction.modifier)
+                        .clickable(role = Role.Button, onClick = toggle)
+                        .padding(start = 16.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        face.title.uiText(), modifier = Modifier.weight(1f),
+                        fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, color = colors.onSurfaceContainer,
+                    )
+                    if (face.current) {
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在使用", fontSize = 12.sp, color = colors.onSurfaceVariantSummary)
+                    }
+                    ExpandButton(expanded, "表盘信息", onClick = toggle)
+                }
+                if (expanded) {
+                    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ValueRow("版本", face.version.ifBlank { "手表未提供" })
+                            ValueRow("ID", face.id)
+                            ValueRow("类型", face.kind)
+                        }
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 8.dp), thickness = 0.5.dp,
+                            color = colors.outline.copy(alpha = 0.5f),
+                        )
+                        FaceCardActions(
+                            face, epoch, state, actions, host, ownerCurrent = { rowOwner.get() },
+                            expandedIntentCurrent = { expanded && renderedExpanded },
+                        )
+                    }
+                }
             }
         }
     }
@@ -308,11 +385,11 @@ private fun FaceRow(face: FaceItem, epoch: Long, selected: Boolean, enabled: Boo
 
 @Composable
 private fun ExpandButton(expanded: Boolean, label: String, onClick: () -> Unit) {
-    val angle by animateFloatAsState(if(expanded) 180f else 0f, tween(160), label = "展开箭头")
+    val angle by animateFloatAsState(if (expanded) 180f else 0f, tween(160), label = "展开箭头")
     IconButton(onClick = onClick) {
         Icon(
             imageVector = WatchIcons.Expand,
-            contentDescription = (if(expanded) "收起" else "展开") + label,
+            contentDescription = (if (expanded) "收起" else "展开") + label,
             modifier = Modifier.size(24.dp).rotate(angle),
             tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
@@ -322,10 +399,10 @@ private fun ExpandButton(expanded: Boolean, label: String, onClick: () -> Unit) 
 @Composable
 private fun SourceDetails(source: SourceInfo, modifier: Modifier = Modifier) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ValueRow("表盘名称", source.title)
         ValueRow("源文件大小", formatBytes(source.sourceBytes))
         ValueRow("待传输内容", formatBytes(source.payloadBytes.toLong()))
         ValueRow("文件版本", source.xmlVersion.ifBlank { "未提供" })
-        ValueRow("SHA-256", source.sha256.take(16) + "…")
         HwtPreview(source)
     }
 }

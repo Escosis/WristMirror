@@ -5,8 +5,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Pure observations for one existing ordinary face's same-ID, installed-version op1.
- * The owner validates the selected source face and scopes replies to its actual identity;
+ * Pure observations for one existing supported face's same-ID, installed-version op1.
+ * The owner validates the requested source row and scopes replies to its actual identity;
  * this state never chooses another resource, sends a command, transfers a file or retries.
  * Only an explicit successful 27/03 permits one QUERY. The owner must attach the generation
  * when creating that query, supply increasing positive local query serials, and bound polls
@@ -160,8 +160,8 @@ public final class ActivationState {
             fail("ACTIVATION_TARGET_INSTALLED_VERSION_CHANGED", null);
             return;
         }
-        if (!FacePolicy.eligible(target)) {
-            fail("ACTIVATION_TARGET_NO_LONGER_ELIGIBLE", null);
+        if (!FacePolicy.canActivate(target)) {
+            fail("ACTIVATION_TARGET_NO_LONGER_ACTIVATABLE", null);
             return;
         }
         if (current && currentCount == 1) {

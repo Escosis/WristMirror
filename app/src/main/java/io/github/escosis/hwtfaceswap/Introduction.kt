@@ -100,7 +100,7 @@ internal object IntroductionContent {
         - 该应用无法与运动健康同时连接手表，请先清除其后台再运行此应用。
         - 请先在电脑浏览器中登录 [华为商城](https://www.vmall.com) 并按以下路径找到华为 ID（一串纯数字）：开发人员工具 - 应用程序 - Cookie - https://www.vmall.com - uid，或通过腕连手表助手一键获取。如已知 ID 则跳过此步。注意，乱填会导致手表数据清空！
         - 替换法等效于删除原表盘，请先前往华为运动健康下载免费表盘，或选择无用表盘进行替换操作。被替换的表盘可重新从商店中下回。
-        - 该应用暂时不支持 WATCH 系列设备，此类用户可直接使用 GadgetBridge 或腕连手表助手安装第三方表盘。
+        - 该应用可能不支持 WATCH 系列设备或鸿蒙手机，此类用户如使用时遇到问题可直接使用 GadgetBridge 或腕连手表助手安装第三方表盘。
     """.trimIndent()
 
     val sections: List<IntroductionSection> = parse(markdown)

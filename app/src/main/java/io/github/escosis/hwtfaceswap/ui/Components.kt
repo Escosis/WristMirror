@@ -29,6 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathHitTester
@@ -232,9 +234,14 @@ internal fun ActionButton(
     }
 }
 
-/** 提示只是同一 Button 的指针层；不声明可用点击语义，也不改变任何 disabled 颜色。 */
+internal enum class DisabledButtonHintShape { SQUIRCLE_16, CAPSULE }
+
+/** 提示只是同一 Button 的指针层；默认仍是旧 16dp squircle，不声明可用点击语义。 */
 @Composable
-private fun disabledButtonHintModifier(hint: () -> Unit): Modifier {
+internal fun disabledButtonHintModifier(
+    hint: () -> Unit,
+    shape: DisabledButtonHintShape = DisabledButtonHintShape.SQUIRCLE_16,
+): Modifier {
     val owner = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
     val coordinates = remember { arrayOfNulls<LayoutCoordinates>(1) }
     val latestHint by rememberUpdatedState(hint)
@@ -248,7 +255,7 @@ private fun disabledButtonHintModifier(hint: () -> Unit): Modifier {
             coordinates[0] = null
         }
     }
-    return Modifier.onGloballyPositioned { coordinates[0] = it }.pointerInput(owner, hint, squircleEnabled) {
+    return Modifier.onGloballyPositioned { coordinates[0] = it }.pointerInput(owner, hint, squircleEnabled, shape) {
         fun visibleAt(position: androidx.compose.ui.geometry.Offset): Boolean {
             val placed = coordinates[0] ?: return false
             if (!owner.get() || latestHint !== hint || !placed.isAttached || placed.size != size ||
@@ -262,7 +269,12 @@ private fun disabledButtonHintModifier(hint: () -> Unit): Modifier {
         }
         fun insideButton(position: androidx.compose.ui.geometry.Offset): Boolean {
             val path = Path().apply {
-                addSquircleRect(size.width.toFloat(), size.height.toFloat(), 16.dp.toPx(), squircleEnabled = squircleEnabled)
+                if (shape == DisabledButtonHintShape.CAPSULE) {
+                    val radius = minOf(size.width, size.height).toFloat() * 0.5f
+                    addRoundRect(RoundRect(0f, 0f, size.width.toFloat(), size.height.toFloat(), CornerRadius(radius, radius)))
+                } else {
+                    addSquircleRect(size.width.toFloat(), size.height.toFloat(), 16.dp.toPx(), squircleEnabled = squircleEnabled)
+                }
             }
             return PathHitTester(path).contains(position)
         }

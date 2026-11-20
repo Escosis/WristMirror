@@ -47,6 +47,18 @@ public final class FacePolicy {
     }
 
     /**
+     * 启用已安装资源与覆盖/删除资格分离：已观察到的 05 仅含已知 0xff 位，
+     * 07 采用官方缺省 0 或已知 0..5 即可。预置、试用及特殊表盘可以走原 ID/原版本 op1，
+     * 但这不允许新文件、特殊配置、版本改写或推定许可；未知/无效资源仍禁用。
+     */
+    public static boolean canActivate(TlvView.Face face) {
+        if(!typeObserved(face) || !face.validResource())return false;
+        if((face.type.longValue()&~KNOWN_RAW_BITS)!=0)return false;
+        long expand=effectiveExpandType(face);
+        return expand>=0 && expand<=EXPAND_STICKER;
+    }
+
+    /**
      * 仅提供类型标签，不编造表盘名称。特殊类型的优先级遵循原生
      * WatchFaceWearService.getWatchType(II)：视频、相册、万花筒、穿戴，然后是贴纸。
      */

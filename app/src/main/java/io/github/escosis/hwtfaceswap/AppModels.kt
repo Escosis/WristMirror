@@ -35,6 +35,7 @@ data class FaceItem(
     val current: Boolean = false,
     val selectable: Boolean = false,
     val kind: String = "类型未确认",
+    val activatable: Boolean = false,
 ) {
     val title: String get() = when (kind) {
         "趣味贴纸", "相册表盘", "视频表盘" -> kind
@@ -190,6 +191,10 @@ interface AppActions {
     fun cancelHwtPick()
     fun importHwt(uri: Uri)
     fun requestReplacement()
+    /** 逐卡入口绑定该卡原始观察，不依赖全局选中状态。 */
+    fun requestReplacement(face: FaceItem, epoch: Long) {}
+    fun requestActivation(face: FaceItem, epoch: Long) {}
+    fun requestDeletion(face: FaceItem, epoch: Long) {}
     /** 仅显式中断当前令牌；实际停止前仍保持 active。旧界面假实现可保持无操作。 */
     fun interruptReplacement(token: Long) {}
     /** 仅关闭同一令牌的非活动结果，不改变原生操作、错误或隔离状态。 */
