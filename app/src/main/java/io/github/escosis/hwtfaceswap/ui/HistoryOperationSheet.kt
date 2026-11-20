@@ -180,6 +180,17 @@ internal fun HuaweiIdDialog(
     // 仅窗口存活期间的普通 remember：退出仍显示掩码，实际退出/移除时清空，不使用 rememberSaveable。
     var lastValue by remember(incarnation) { mutableStateOf(value) }
     var revealId by remember(incarnation) { mutableStateOf(false) }
+    val acquisition = rememberHuaweiIdAcquisition(
+        ownerKey = "$incarnation:$address",
+        enabled = show && canEdit,
+        isCurrent = isCurrent,
+        onAcquired = { id ->
+            if (show && isCurrent() && canEdit) {
+                revealId = true
+                onValueChange(id)
+            }
+        },
+    )
     SideEffect {
         if (show) {
             lastPresentation = currentPresentation
@@ -191,6 +202,11 @@ internal fun HuaweiIdDialog(
     }
     val presentation = if (show) currentPresentation else lastPresentation
     val presentedValue = if (show) value else lastValue
+    LaunchedEffect(incarnation, feedback, show) {
+        if (show && isCurrent() && presentation.feedback.isNotBlank()) {
+            acquisition.notify(presentation.feedback)
+        }
+    }
     // show=false 的第一帧同步遮蔽，不等 LaunchedEffect；不靠清空字段来改变退出中的按钮资格。
     val visiblyRevealed = show && revealId
 
@@ -220,15 +236,17 @@ internal fun HuaweiIdDialog(
             }
             MiuixField(
                 value = presentedValue,
-                onValueChange = { if (isCurrent() && canEdit) onValueChange(it) },
+                onValueChange = { if (isCurrent() && canEdit && !acquisition.busy) onValueChange(it) },
                 label = "输入华为 ID",
-                enabled = presentation.canEdit,
-                keyboardType = KeyboardType.Password,
+                enabled = presentation.canEdit && !acquisition.busy,
+                retainOutlineWhenDisabled = true,
+                keyboardType = KeyboardType.Text,
                 visualTransformation = if (visiblyRevealed) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(
-                        onClick = { if (isCurrent()) revealId = !revealId },
+                        onClick = { if (isCurrent() && !acquisition.busy) revealId = !revealId },
                         modifier = Modifier.padding(horizontal = 6.dp),
+                        enabled = !acquisition.busy,
                     ) {
                         Text(
                             if (visiblyRevealed) "隐藏" else "显示",
@@ -242,24 +260,30 @@ internal fun HuaweiIdDialog(
                 if (presentation.connected) "修改后保存，下次连接时生效。"
                 else "为这台设备填写与运动健康一致的华为 ID。",
             )
-            if (presentation.feedback.isNotBlank()) MutedText(presentation.feedback)
+            ActionButton(
+                text = "一键获取华为 ID",
+                onClick = acquisition.start,
+                modifier = Modifier.fillMaxWidth(),
+                primary = true,
+                enabled = show && presentation.canEdit && !acquisition.busy,
+            )
             if (!presentation.connected) {
                 ActionButton(
                     text = "连接手表",
-                    onClick = { if (isCurrent() && canConnect) onConnect() },
+                    onClick = { if (isCurrent() && canConnect && !acquisition.busy) onConnect() },
                     modifier = Modifier.fillMaxWidth(),
                     primary = true,
-                    enabled = presentation.canConnect,
+                    enabled = presentation.canConnect && !acquisition.busy,
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 ActionButton("关闭", onClick = { if (isCurrent()) dismiss?.invoke() }, modifier = Modifier.weight(1f))
                 ActionButton(
                     text = "保存 ID",
-                    onClick = { if (isCurrent() && canEdit) onSave() },
+                    onClick = { if (isCurrent() && canEdit && !acquisition.busy) onSave() },
                     modifier = Modifier.weight(1f),
                     primary = presentation.connected,
-                    enabled = presentation.canSave,
+                    enabled = presentation.canSave && !acquisition.busy,
                 )
             }
         }
@@ -305,7 +329,7 @@ internal fun HistoryHuaweiIdDialog(
         if (!show || !isOwnerCurrent()) return@LaunchedEffect
         val id = onReadHuaweiId()
         if (!show || !isOwnerCurrent()) return@LaunchedEffect
-        if (id == null) feedback = "无法读取这台设备的内部华为 ID，请稍后重试。"
+        if (id == null) feedback = "无法读取这台设备的华为 ID，请稍后重试。"
         else {
             draft = id
             savedId = id

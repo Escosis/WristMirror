@@ -110,7 +110,7 @@ data class AppUiState(
     val phaseCode: String = "IDLE",
     val connectionEpoch: Long = 0,
     val phase: String = "尚未连接",
-    val detail: String = "搜索设备，输入内部华为 ID 后连接",
+    val detail: String = "搜索设备，输入华为 ID 后连接",
     val connected: Boolean = false,
     val connecting: Boolean = false,
     val watchName: String = "",

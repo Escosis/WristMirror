@@ -65,7 +65,7 @@ public final class SecureStore {
     }
     public String virtualMac(String mac)throws IOException{synchronized(DeviceRemovalJournal.LOCK){removals.requireUsable(mac);String name="virtual_mac_"+suffix(mac);byte[] stored=get(name);if(stored==null){byte[] b=new byte[3];random.nextBytes(b);stored=String.format(Locale.ROOT,"FF:FF:FF:%02X:%02X:%02X",b[0]&255,b[1]&255,b[2]&255).getBytes(StandardCharsets.US_ASCII);put(name,stored);}return new String(stored,StandardCharsets.US_ASCII);}}
     public String huaweiId(String mac)throws IOException{synchronized(DeviceRemovalJournal.LOCK){removals.requireUsable(mac);byte[] b=get("huawei_id_"+suffix(mac));return b==null?"":Core.utf8(b);}}
-    /** 每个设备独立保存内部 ID，账户值不写入共享的最近使用槽。 */
+    /** 每个设备独立保存华为 ID，账户值不写入共享的最近使用槽。 */
     public void saveHuaweiId(String mac,String id)throws IOException{synchronized(DeviceRemovalJournal.LOCK){removals.requireUsable(mac);String s=id==null?"":id.trim();if(s.getBytes(StandardCharsets.UTF_8).length>128)throw new Core.Fault("HUAWEI_ID_TOO_LONG");put("huawei_id_"+suffix(mac),s.getBytes(StandardCharsets.UTF_8));}}
     public byte[] authKey(String mac)throws IOException{synchronized(DeviceRemovalJournal.LOCK){removals.requireUsable(mac);byte[] key=get("auth_"+suffix(mac));return key==null?null:key.clone();}}
     public void saveAuthKey(String mac,byte[] bytes)throws IOException{synchronized(DeviceRemovalJournal.LOCK){removals.requireUsable(mac);if(bytes==null||(bytes.length!=16&&bytes.length!=24&&bytes.length!=32))throw new Core.Fault("AUTH_KEY_LENGTH_UNSUPPORTED");put("auth_"+suffix(mac),bytes.clone());}}

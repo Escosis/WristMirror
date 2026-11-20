@@ -381,7 +381,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private fun connectionDetail(s: AppRuntime.Snapshot): String = when(s.code) {
         "AGREEMENT_CONFIRM" -> "继续连接初始化"
         "SYSTEM_PAIRING" -> "请在手机和手表确认系统配对"
-        "ACCOUNT" -> "同步内部华为 ID"
+        "ACCOUNT" -> "同步华为 ID"
         "PIN_REQUEST" -> "请求手表配对信息"
         "PIN_INPUT" -> "输入手表显示的配对码"
         "BOND_PARAMS" -> "读取协议绑定参数"
@@ -394,7 +394,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         ?: mutable.value.savedDevices.firstOrNull { it.address.equals(address, true) }?.nearby()
     private fun savedHuaweiId(address: String?): String = if(address == null || removalBlocks(address)) "" else runCatching {
         runtime.secure.huaweiId(address)
-    }.getOrElse { message("无法读取该设备的内部华为 ID：${Core.code(it)}"); "" }
+    }.getOrElse { message("无法读取该设备的华为 ID：${Core.code(it)}"); "" }
     private fun restoreHuaweiId(address: String?) {
         val id = savedHuaweiId(address)
         savedEditorId = id
@@ -423,7 +423,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!startupConnectionOpportunity.take(introductionPending = false, eligible = eligible)) return null
         val device = mutable.value.savedDevices.firstOrNull { !removalBlocks(it.address) }?.nearby() ?: return null
         selectDevice(device)
-        if(!mutable.value.accountConfigured) { message("上次设备的内部华为 ID 无法读取，请重新输入后连接"); return null }
+        if(!mutable.value.accountConfigured) { message("上次设备的华为 ID 无法读取，请重新输入后连接"); return null }
         return device
     }
     private fun message(text: String) {
@@ -452,7 +452,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         val address = mutable.value.selectedDeviceAddress ?: run { message("请先选择一台手表"); return }
         val id = mutable.value.huaweiIdInput.trim()
         if(id.isEmpty() || id.toByteArray(Charsets.UTF_8).size > 128 || id.any(Char::isISOControl) || (id.all(Char::isDigit) && id.length > 19)) {
-            message("请输入有效的内部华为 ID"); return
+            message("请输入有效的华为 ID"); return
         }
         runCatching { runtime.secure.saveHuaweiId(address, id) }.onSuccess {
             savedEditorId = id
@@ -489,7 +489,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
                 runtime.secure.huaweiId(address)
             } ?: return@runCatching null
             if(deviceHuaweiIdSnapshotCurrent(address, epoch, runtime.snapshot()) && journal.usable(address, generation)) id else null
-        }.getOrElse { message("无法读取该设备的内部华为 ID：${Core.code(it)}"); null }
+        }.getOrElse { message("无法读取该设备的华为 ID：${Core.code(it)}"); null }
     }
     override fun saveHuaweiIdForDevice(device: NearbyWatch, value: String): Boolean {
         val address = SavedWatchStore.canonicalAddress(device.address) ?: run { message("设备地址无效"); return false }
@@ -498,7 +498,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!deviceHuaweiIdSnapshotCurrent(address, epoch, snapshot)) return false
         val id = value.trim()
         if(id.isEmpty() || id.toByteArray(Charsets.UTF_8).size > 128 || id.any(Char::isISOControl) || (id.all(Char::isDigit) && id.length > 19)) {
-            message("请输入有效的内部华为 ID"); return false
+            message("请输入有效的华为 ID"); return false
         }
         return runCatching {
             val journal = runtime.secure.removals()
@@ -617,13 +617,13 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         val generation = runCatching { runtime.secure.removals().generation(address) }.getOrElse { message("无法核实设备资料状态：${Core.code(it)}"); return }
         if(generation > 0L && knownUnpairDevice(address) == null) { message("此设备记录已清除，请重新搜索后连接设备"); return }
         val id = huaweiId.trim()
-        if(id.isNotEmpty() && (id.toByteArray(Charsets.UTF_8).size > 128 || (id.all(Char::isDigit) && id.length > 19))) { message("内部华为 ID 长度不支持"); return }
+        if(id.isNotEmpty() && (id.toByteArray(Charsets.UTF_8).size > 128 || (id.all(Char::isDigit) && id.length > 19))) { message("华为 ID 长度不支持"); return }
         if(mutable.value.selectedDeviceAddress != address) selectDevice(device)
         if(id.isEmpty()) {
-            // 明确的空输入代表当前设备已加密保存的内部 ID，
+            // 明确的空输入代表当前设备已加密保存的华为 ID，
             // 不代表界面草稿或另一设备的最近使用值。
             restoreHuaweiId(address)
-            if(!mutable.value.accountConfigured) { message("此手表尚无保存的内部华为 ID，请输入后连接"); return }
+            if(!mutable.value.accountConfigured) { message("此手表尚无保存的华为 ID，请输入后连接"); return }
         } else setHuaweiId(id)
         val requested = device.copy(address = address)
         val revision = mutable.value.connectionFormRevision
@@ -648,7 +648,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
                 }
             }
         }
-        if(id.isNotEmpty() && (!id.all(Char::isDigit) || id.length == 11)) prompt("account-warning", "确认内部 ID", "这可能不是内部华为 ID。请核对与运动健康或腕连显示的 ID 是否一致，是否继续使用？", false, "确认使用", action)
+        if(id.isNotEmpty() && (!id.all(Char::isDigit) || id.length == 11)) prompt("account-warning", "确认华为 ID", "这可能不是华为 ID。请核对与运动健康使用的 ID 是否一致，是否继续使用？", false, "确认使用", action)
         else action()
     }
     override fun disconnect() {

@@ -243,7 +243,7 @@ public final class WatchConnection implements LinkChannel.Listener {
         if(!sessionVerified||cipher==null||ready||phase.equals("FAILED")||phase.equals("IDLE"))throw new Core.Fault("INITIALIZATION_SESSION_REQUIRED");
         switch(step){
             case 0:if(caps.hasCommand(1,0x37)){initRequest("EXPAND_CAPS","读取扩展能力",1,0x37,Core.tlv(1,new byte[0]),1,true);return;}skipped("EXPAND_CAPS");advanceInit(1);return;
-            case 1:if(caps.accountSupported()&&!huaweiId.isEmpty()){initRequest("ACCOUNT","附送内部账户 ID",0x1a,5,caps.accountRequest(huaweiId),2,true);return;}skipped("ACCOUNT");advanceInit(2);return;
+            case 1:if(caps.accountSupported()&&!huaweiId.isEmpty()){initRequest("ACCOUNT","附送华为 ID",0x1a,5,caps.accountRequest(huaweiId),2,true);return;}skipped("ACCOUNT");advanceInit(2);return;
             case 2:if(caps.hasCommand(1,0x31)){initRequest("SETTINGS","读取初始化设置项",1,0x31,WristInitialization.settingsRequest(),3,true);return;}skipped("SETTINGS");advanceInit(3);return;
             case 3:if(caps.hasCommand(1,0x30)){stage("AGREEMENT_CONFIRM","继续完成连接初始化",120000);return;}skipped("AGREEMENTS");advanceInit(4);return;
             case 4:if(caps.hasCommand(1,0x3f)){initRequest("REVERSE_CAPS","发送原协议反向能力声明",1,0x3f,WristInitialization.reverseRequest(),5,true);return;}skipped("REVERSE_CAPS");advanceInit(5);return;

@@ -25,9 +25,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- 联网权限用于查询 GitHub 发行版本，蓝牙功能无需网络。 -->
+    <!-- 联网用于更新检查及用户主动打开的官方华为 ID 登录页，蓝牙协议无需网络。 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <application
+        android:name=".WristMirrorApplication"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -47,6 +48,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- A single-use system WebView; never hosts the Bluetooth runtime. -->
+        <activity
+            android:name=".account.HuaweiIdWebActivity"
+            android:exported="false"
+            android:process=":huawei_id"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".transport.ConnectionService"
             android:exported="false"

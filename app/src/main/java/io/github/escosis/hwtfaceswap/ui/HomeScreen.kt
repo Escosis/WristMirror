@@ -250,7 +250,6 @@ private fun homeCopyValue(rendered: AppUiState, current: AppUiState, label: Stri
     return latestValue?.takeIf { it == renderedValue }
 }
 
-/** 输入为腕连归一后的显示等效值，不将其当成设备原始精确字节数。 */
 private fun homeMemoryText(bytes: Long): String {
     val megabytes = bytes / (1024L * 1024L)
     return if (megabytes >= 1024L) {

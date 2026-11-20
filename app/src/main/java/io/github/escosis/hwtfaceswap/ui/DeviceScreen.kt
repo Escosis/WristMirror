@@ -62,7 +62,7 @@ private data class HistoryIdConnectRequest(
     val ownerEpoch: Long,
 )
 
-// 待切换动作只记录明确点击的设备、局部代次与回显版本，不携带内部 ID 草稿。
+// 待切换动作只记录明确点击的设备、局部代次与回显版本，不携带华为 ID 草稿。
 private data class DeviceSelectionRequest(
     val device: NearbyWatch,
     val reconnect: Boolean,
@@ -316,7 +316,7 @@ internal fun DeviceScreen(
         closeDialog()
         if (current.scanning) latestActions.stopScan()
         // 先同步目标设备，再写回本次点击读取的最新草稿，避免切换回显覆盖输入。
-        // 系统权限与内部 ID 的原确认仍由父界面的连接入口处理。
+        // 系统权限与华为 ID 的原确认仍由父界面的连接入口处理。
         latestActions.selectDevice(device)
         latestActions.setHuaweiId(enteredId)
         latestOnConnect(device, enteredId)
@@ -665,13 +665,13 @@ private fun SelectedWatchCard(
         }
         MutedText(
             when {
-                selectedAddress == null -> "搜索附近设备，选择后配置内部华为 ID 并连接。"
+                selectedAddress == null -> "搜索附近设备，选择后配置华为 ID 并连接。"
                 UiPolicy.isUnpairTarget(state, selectedAddress) -> "解除配对尚未完成，请在下方状态中继续。"
                 state.quarantine -> "设备操作已暂停，请断开后重新连接。"
                 state.connected -> "在此管理连接，设备状态与信息可在主页查看。"
                 state.connecting -> "正在建立连接，可取消后重新选择设备。"
-                !state.accountConfigured || state.huaweiIdInput.isBlank() -> "请先为这台设备配置内部华为 ID。"
-                state.huaweiIdDirty -> "内部华为 ID 有未保存修改。"
+                !state.accountConfigured || state.huaweiIdInput.isBlank() -> "请先为这台设备配置华为 ID。"
+                state.huaweiIdDirty -> "华为 ID 有未保存修改。"
                 else -> "连接后可管理此手表的表盘。"
             },
         )
@@ -858,7 +858,7 @@ private fun DiscoveryDialog(
                     enabled = presentation.scanning || presentation.canSelect,
                 )
                 Spacer(Modifier.height(10.dp))
-                MutedText(if (presentation.scanning) "正在搜索，点击设备即可配置并连接。" else "选择一台手表，为它配置内部华为 ID。")
+                MutedText(if (presentation.scanning) "正在搜索，点击设备即可配置并连接。" else "选择一个手表，为它配置华为 ID。")
             }
             if (visibleDevices.isEmpty()) {
                 item(key = "empty") {

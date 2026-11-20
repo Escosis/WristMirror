@@ -154,6 +154,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        io.github.escosis.hwtfaceswap.account.HuaweiIdWebSession.pruneAtStartup(this)
         // 设置页返回不是成功证据：重新经过当前适配器/权限/MAC 的真实 bond-state 读取。
         watchViewModel.verifyUnpairAfterSettings()
     }

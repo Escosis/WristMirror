@@ -117,6 +117,7 @@ internal fun MiuixField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     leadingIcon: (@Composable () -> Unit)? = null,
     trailingIcon: (@Composable () -> Unit)? = null,
+    retainOutlineWhenDisabled: Boolean = false,
 ) {
     val scheme = MiuixTheme.colorScheme
     OutlinedTextField(
@@ -137,11 +138,14 @@ internal fun MiuixField(
             disabledTextColor = scheme.disabledOnSurface,
             focusedBorderColor = scheme.primary,
             unfocusedBorderColor = scheme.onSurfaceVariantSummary,
+            disabledBorderColor = if (retainOutlineWhenDisabled) scheme.onSurfaceVariantSummary else Color.Unspecified,
             focusedLabelColor = scheme.primary,
             unfocusedLabelColor = scheme.onSurfaceVariantSummary,
+            disabledLabelColor = if (retainOutlineWhenDisabled) scheme.onSurfaceVariantSummary else Color.Unspecified,
             cursorColor = scheme.primary,
             focusedContainerColor = Color.Transparent,
             unfocusedContainerColor = Color.Transparent,
+            disabledContainerColor = if (retainOutlineWhenDisabled) Color.Transparent else Color.Unspecified,
         ),
     )
 }
