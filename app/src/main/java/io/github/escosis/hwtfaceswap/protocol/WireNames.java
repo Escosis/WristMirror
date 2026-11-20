@@ -22,9 +22,12 @@ public final class WireNames {
     public static final class Response {
         public final Map<String,String> names;
         public final Set<String> ids;
-        private Response(Map<String,String> names,Set<String> ids) {
+        /** 仅显示名称的UTF-8损坏计数；不包含名称正文，不影响资源/操作资格。 */
+        public final int malformedNameCount;
+        private Response(Map<String,String> names,Set<String> ids,int malformedNameCount) {
             this.names=Collections.unmodifiableMap(new LinkedHashMap<String,String>(names));
             this.ids=Collections.unmodifiableSet(new LinkedHashSet<String>(ids));
+            this.malformedNameCount=malformedNameCount;
         }
     }
 
@@ -69,7 +72,8 @@ public final class WireNames {
      * 仅在根及条目两层按 tag bit7 接受父容器（含原 82/83）；不递归、扫描或扁平化。
      * 条目 04 是 ID，05 是名称，06 简介、07 大小、08 实例仅作为元数据。
      * 名称空或缺失时保留有效 ID，但省略名称关联；ID 不支持或缺失时省略条目，绝不编造名称。
-     * UTF-8 非法或超限、关键标签重复、有效 ID 重复时均报错。
+     * 损坏的显示名称仅省略该名称，保留已验证ID及其它名称；不猜编码、不生成替换字符。
+     * 协议ID的UTF-8非法、长度/字符超限、关键标签重复、有效ID重复仍报错。
      * 根 7F 只作唯一的有界数值控制码；0/100000 不代替名称容器，其他值单独报设备错误。
      * 存在但为空的父容器表示空结果；缺失父容器明确表示可选查询失败。
      * 多个根或页面可在本次有界解析内合并；跨包重复 ID
@@ -83,7 +87,7 @@ public final class WireNames {
             if(code!=0 && code!=100000)throw new Core.Fault("NAMES_DEVICE_ERROR_"+code);
         }
         LinkedHashMap<String,String> result=new LinkedHashMap<String,String>();
-        LinkedHashSet<String> seenIds=new LinkedHashSet<String>();boolean container=false;
+        LinkedHashSet<String> seenIds=new LinkedHashSet<String>();boolean container=false;int malformedNames=0;
         for(TlvView.Part root:fields){
             if((root.tag&0x80)==0)continue;container=true;
             for(TlvView.Part entry:budget.decode(root.value)){
@@ -97,8 +101,13 @@ public final class WireNames {
                 }
                 if(nameField!=null){
                     if(nameField.value.length>MAX_NAME_BYTES)throw new Core.Fault("NAMES_NAME_BYTES_LIMIT");
-                    name=Core.utf8(nameField.value);
-                    if(name.codePointCount(0,name.length())>MAX_NAME_CHARACTERS)throw new Core.Fault("NAMES_NAME_CHARACTER_LIMIT");
+                    try{name=Core.utf8(nameField.value);}
+                    catch(Core.Fault malformed){
+                        if(!"INVALID_UTF8".equals(malformed.code))throw malformed;
+                        // 名称不是ID、许可或接受回执。只省略这项显示，整批其它名称继续保留。
+                        malformedNames++;
+                    }
+                    if(name!=null&&name.codePointCount(0,name.length())>MAX_NAME_CHARACTERS)throw new Core.Fault("NAMES_NAME_CHARACTER_LIMIT");
                 }
                 if(!validId(id))continue; // 没有可建立的名称关联，不表示权限失败
                 if(!seenIds.add(id))throw new Core.Fault("NAMES_DUPLICATE_ID");
@@ -107,7 +116,7 @@ public final class WireNames {
             }
         }
         if(!container)throw new Core.Fault("NAMES_RESPONSE_CONTAINER_MISSING");
-        return new Response(result,seenIds);
+        return new Response(result,seenIds,malformedNames);
     }
 
     private static boolean hasVisibleText(String name) {

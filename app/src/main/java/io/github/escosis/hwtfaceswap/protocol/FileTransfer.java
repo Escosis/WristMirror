@@ -200,14 +200,15 @@ public final class FileTransfer implements Closeable {
 
     private List<Outgoing> infoReply(List<TlvView.Part> fields) throws IOException {
         TlvView.Part name = required(fields, 0x01);
-        int type = byteNumber(required(fields, 0x03));
+        int type = metadataByteNumber(required(fields, 0x03));
         // 原生任务标识是文件名加文件类型，不是后续的 protocolVersion。
         // 明确属于其他任务的回包，不得影响本任务或在此分配其 ID。
         if (!Arrays.equals(name.value, filename) || type != 1) return Collections.emptyList();
         requireStage(Stage.WAIT_INFO);
-        int assignedId = byteNumber(required(fields, 0x04));
+        int assignedId = metadataByteNumber(required(fields, 0x04));
         long code = fixedNumber(required(fields, 0x7f), 4);
-        if (code != SUCCESS) throw new Core.Fault("FILE_TRANSFER_INFO_ERROR_" + code);
+        // Health 为100000，腕连原metadata分支也接受明确0；不采用其缺失/短header默认0。
+        if (code != SUCCESS && code != 0) throw new Core.Fault("FILE_TRANSFER_INFO_ERROR_" + code);
         // Unite 将 ID 默认为 -1，Classic 默认为 0；两者都不能证明缺失的 04 表示 ID 0。
         currentFileId = assignedId;
         stage = Stage.WAIT_CONSULT;
@@ -534,6 +535,36 @@ public final class FileTransfer implements Closeable {
 
     private static int byteNumber(TlvView.Part value) throws IOException {
         return (int) fixedNumber(value, 1);
+    }
+
+    /** Health metadata03/04读取完整非空BE1..4；文件单元仍只能使用合法u8 ID。 */
+    private static int metadataByteNumber(TlvView.Part value) throws IOException {
+        long number = Core.number(value.value);
+        if (number > 255) throw new Core.Fault("FILE_TRANSFER_METADATA_U8_RANGE_" + Integer.toHexString(value.tag));
+        return (int) number;
+    }
+
+    /** 只读文件登记回包形状。只输出标签/长度/数值/匹配布尔，不记录对端文件名或正文。 */
+    public synchronized String infoReplyObservation(byte[] body) {
+        try {
+            List<TlvView.Part> values = fields(body);
+            TlvView.Part name = Wire.unique(values, 0x01);
+            return "tags=" + TlvView.tags(values) + " filename_match=" +
+                (name == null ? "missing" : Boolean.toString(Arrays.equals(name.value, filename))) +
+                " type=" + scalarObservation(values, 0x03) +
+                " assigned_file_id=" + scalarObservation(values, 0x04) +
+                " result=" + scalarObservation(values, 0x7f);
+        } catch (IOException malformed) {
+            return "tags=unparsed diagnostic_code=" + Core.code(malformed);
+        }
+    }
+
+    private static String scalarObservation(List<TlvView.Part> values, int tag) {
+        try {
+            TlvView.Part value = Wire.unique(values, tag);
+            if (value == null) return "missing";
+            return Long.toString(Core.number(value.value));
+        } catch (IOException malformed) { return "invalid"; }
     }
 
     private void requireRegistered() throws IOException {

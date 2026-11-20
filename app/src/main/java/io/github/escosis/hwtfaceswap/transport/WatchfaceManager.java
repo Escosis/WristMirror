@@ -403,11 +403,12 @@ public final class WatchfaceManager {
         }},15000);
     }
     public void packet(long epoch,int service,int command,byte[] body,boolean encrypted){
-        if(epoch!=connection.epoch()||!connection.ready())return;Op op=active;if(op!=null&&op.epoch!=epoch)return;boolean owned=false;List<TlvView.Part> observedFields=null;
+        if(epoch!=connection.epoch()||!connection.ready())return;Op op=active;if(op!=null&&op.epoch!=epoch)return;boolean owned=false;List<TlvView.Part> observedFields=null;String fileStage=null;
         try{
             if(service==0x28){
                 if(!(op instanceof Replace)||command<2||command>8)return;Replace r=(Replace)op;if(r.file==null)return;
-                if(command==6){log.record("RAW_FILE_DATA_OBSERVED","bytes="+body.length+" no_ack_or_completion_inference=true");return;}owned=true;
+                if(command==6){log.record("RAW_FILE_DATA_OBSERVED","bytes="+body.length+" no_ack_or_completion_inference=true");return;}owned=true;fileStage=r.file.stateLabel();
+                if(command==2)log.record("FILE_INFO_RESPONSE","stage="+fileStage+" bytes="+(body==null?0:body.length)+" "+r.file.infoReplyObservation(body));
                 for(FileTransfer.Outgoing out:r.file.onPacket(command,body,true))connection.sendFile(out.command,out.body(),out.encrypt);
                 if(command==3){List<TlvView.Part> hashFields=TlvView.decode(body);log.record("FILE_HASH_REQUEST","file_id="+r.file.fileId()+" check_mode="+Wire.number(hashFields,2)+" missing_not_defaulted_to_three=true");}
                 if(command==7&&r.file.resultObserved()){
@@ -451,6 +452,7 @@ public final class WatchfaceManager {
                 show(a);finish(a);
             }
         }catch(IOException e){
+            if(service==0x28)log.record("FILE_TRANSFER_ERROR","command="+command+" stage="+fileStage+" code="+Core.code(e)+" bytes="+(body==null?0:body.length)+" owned="+owned+" no_retry=true");
             if(service==0x27&&command==6){
                 // 名称仅用于显示；格式/设备错误不清列表、不终止当前操作，也不冒充替换失败。
                 log.record("NAMES_UNAVAILABLE","code="+Core.code(e)+" bytes="+(body==null?0:body.length)+" tags="+(observedFields==null?"unparsed":TlvView.tags(observedFields)));
@@ -523,7 +525,7 @@ public final class WatchfaceManager {
         if(run==null||run.epoch!=epoch||run.sourceFaces!=latest){log.record("NAMES_REPLY_IGNORED","bytes="+bytes+" current_owner=false");return;}
         Map<String,String> found=run.state.accept(response);int added=0;
         for(TlvView.Face face:latest){String name=found.get(face.id);if(name!=null&&names.putIfAbsent(face.id+"_"+face.version,Core.clean(name))==null)added++;}
-        log.record("NAMES_BATCH_RESPONSE","received_ids="+response.ids.size()+" matched_names="+added+" bytes="+bytes+" names_only=true");
+        log.record("NAMES_BATCH_RESPONSE","received_ids="+response.ids.size()+" matched_names="+added+" malformed_names_skipped="+response.malformedNameCount+" bytes="+bytes+" names_only=true");
         publishFaces();advanceNames(run);
     }
     private void actReplace(Replace r,ReplacementState.Action action)throws IOException{
@@ -559,7 +561,7 @@ public final class WatchfaceManager {
         show(op);op.finished=SystemClock.elapsedRealtime();active=null;busy=false;query=null;
         if(op instanceof Replace&&((Replace)op).file!=null)try{((Replace)op).file.close();}catch(Exception ignored){}
         boolean ok=op instanceof Replace?(((Replace)op).state.phase==ReplacementState.Phase.LISTED||((Replace)op).state.phase==ReplacementState.Phase.NO_TRANSFER):op instanceof Delete?((Delete)op).state.phase==DeletionState.Phase.DELETED:((Activate)op).state.phase==ActivationState.Phase.ACTIVATED;
-        log.record(op instanceof Replace?"REPLACE_SUMMARY":op instanceof Delete?"DELETE_SUMMARY":"ACTIVATE_SUMMARY","id="+op.id+" version="+op.version+" reliable_protocol_end="+ok+" visual_application_unverified=true");
+        log.record(op instanceof Replace?"REPLACE_SUMMARY":op instanceof Delete?"DELETE_SUMMARY":"ACTIVATE_SUMMARY","id="+op.id+" version="+op.version+" reliable_protocol_end="+ok+" visual_application_unverified=true"+(op instanceof Replace?" "+((Replace)op).state.summary():""));
         if(!ok&&op.epoch==connection.epoch()){
             listAt=0;reconnectEpoch=op.epoch;
             if(!resultSettled)connection.protocolFailure("WATCHFACE_OPERATION_UNCERTAIN_RECONNECT");
