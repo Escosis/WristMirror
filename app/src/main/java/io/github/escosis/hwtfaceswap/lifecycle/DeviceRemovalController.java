@@ -39,6 +39,7 @@ public final class DeviceRemovalController {
         void clearCredentials(String address)throws Exception;
         void removeHistory(String address)throws Exception;
         void finish(String address,long token)throws Exception;
+        void abandon(String address,long token)throws Exception;
     }
     public static final class Snapshot {
         public final boolean pending,working,needsSettings,success;
@@ -54,7 +55,7 @@ public final class DeviceRemovalController {
     private final CopyOnWriteArrayList<Listener> listeners=new CopyOnWriteArrayList<>();
     private volatile Snapshot state=new Snapshot(false,false,false,false,null,"",0,0);
     // 以下字段仅在串行队列使用；reservation/state 的消费以 synchronized 保证一次性。
-    private Record record;private boolean markerStarted;private long watchSerial;private Request requestResult;
+    private volatile Record record;private boolean markerStarted;private long watchSerial;private Request requestResult;
 
     public DeviceRemovalController(Platform platform,Queue queue,Transport transport,Records records) {
         this.platform=Objects.requireNonNull(platform);this.queue=Objects.requireNonNull(queue);
@@ -90,6 +91,21 @@ public final class DeviceRemovalController {
         queue.post(()->start(mac,token,true));return true;
     }
     public void retry(){Snapshot s=state;if(s.pending&&s.address!=null)queue.post(()->start(s.address,s.token,true));}
+    /** 界面探测：只有尚未开始资料清理时才允许撤回，避免把已部分清理的设备放回可用状态。 */
+    public boolean cancelable(){Record current=record;return state.pending&&current!=null&&!current.cleanupStarted;}
+    /** 撤回待处理解除配对：一次都没有清除凭据/历史，因此设备可以直接恢复使用。 */
+    public void cancel(){
+        Snapshot s=state;if(!s.pending||s.address==null)return;
+        queue.post(()->{
+            if(!owned(s.address,s.token))return;
+            Record current=record;
+            if(current==null||current.cleanupStarted){pending(s.address,s.token,false,"清理已经开始，无法撤回解除配对；请完成系统解除配对后重新检查");return;}
+            try{records.abandon(s.address,s.token);}
+            catch(Exception e){pending(s.address,s.token,false,"撤回解除配对失败，请重试（"+code(e)+"）");return;}
+            record=null;markerStarted=false;requestResult=null;++watchSerial;
+            publish(false,false,false,false,s.address,"已取消解除配对；系统配对与本应用资料均保持原状，可以重新连接",s.token);
+        });
+    }
     /** 设置页返回/活动恢复只核实，不再次提交隐藏方法。 */
     public void verify(){Snapshot s=state;if(s.pending&&s.address!=null)queue.post(()->start(s.address,s.token,false));}
     public void openSettings() {

@@ -32,8 +32,8 @@ public final class DeletionState {
         operationError=error;need=transferNeed;operationEcho=echo;
         if(error!=null&&error.longValue()!=0){fail("DELETE_OPERATION_ERROR",error);return Action.NONE;}
         if(terminal())return Action.NONE;
-        // 原生运动健康把缺失的 04 默认为 false；此处绝不把缺失的 7F 视为明确的 0。
-        if(error==null){fail("DELETE_OPERATION_ERROR_MISSING",null);return Action.NONE;}
+        // 0105 日志证明本机 27/03 回包缺 7F；原厂 Health/腕连 都把缺失的 7F 初始化成 0。原始观测保留 null，
+        // 但删除判定仍要求独立的后续列表确认，不会仅凭这一帧就认定删除成功。
         if(transferNeed!=null&&transferNeed.longValue()!=0){fail("DELETE_UNEXPECTED_FILE_REQUEST_NO_TRANSFER",null);return Action.NONE;}
         if(operationObserved)return Action.NONE;
         operationObserved=true;signalGeneration++;consecutiveAbsences=0;phase=Phase.WAIT_LIST;

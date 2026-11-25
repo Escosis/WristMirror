@@ -131,7 +131,7 @@ private fun IntroductionWindowOwner(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                "首次使用说明",
+                "重要提示",
                 modifier = Modifier.semantics { heading() },
                 style = MiuixTheme.textStyles.title3,
                 fontWeight = FontWeight.Medium,

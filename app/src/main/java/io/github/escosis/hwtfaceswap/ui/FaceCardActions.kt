@@ -137,19 +137,25 @@ internal fun FacePageActions(state: AppUiState, actions: AppActions, host: FaceA
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             FacePageActionButton(
-                if (state.listRefreshing) "正在刷新" else "刷新列表", FacePageAction.REFRESH,
+                "选择 HWT", FacePageAction.CHOOSE_HWT,
                 state, actions, host, onPickHwt, Modifier.weight(1f),
             )
             FacePageActionButton(
-                "选择 HWT", FacePageAction.CHOOSE_HWT,
+                "清除导入缓存", FacePageAction.CLEAR_IMPORT_CACHE,
                 state, actions, host, onPickHwt, Modifier.weight(1f),
             )
         }
         Spacer(Modifier.height(12.dp))
-        FacePageActionButton(
-            "清除导入缓存", FacePageAction.CLEAR_IMPORT_CACHE,
-            state, actions, host, onPickHwt, Modifier.fillMaxWidth(),
-        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FacePageActionButton(
+                if (state.listRefreshing) "正在刷新" else "刷新列表", FacePageAction.REFRESH,
+                state, actions, host, onPickHwt, Modifier.weight(1f),
+            )
+            FacePageActionButton(
+                "尝试直接安装", FacePageAction.DIRECT_INSTALL,
+                state, actions, host, onPickHwt, Modifier.weight(1f),
+            )
+        }
     }
 }
 

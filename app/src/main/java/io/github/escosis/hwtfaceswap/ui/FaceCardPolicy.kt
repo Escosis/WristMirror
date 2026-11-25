@@ -8,6 +8,8 @@ import io.github.escosis.hwtfaceswap.ReplacementDialogInfo
 import io.github.escosis.hwtfaceswap.SourceInfo
 import io.github.escosis.hwtfaceswap.ThemeMode
 import io.github.escosis.hwtfaceswap.UiPolicy
+import io.github.escosis.hwtfaceswap.protocol.Core
+import io.github.escosis.hwtfaceswap.protocol.PayloadKinds
 
 /** Explicit app theme wins over the system setting; never infer dark mode from color luminance. */
 internal fun faceCardIconAlpha(theme: ThemeMode, systemDark: Boolean): Float =
@@ -18,7 +20,7 @@ internal enum class FaceCardAction(val label: String) {
     REPLACE("替换"), ENABLE("启用"), DELETE("删除"),
 }
 
-internal enum class FacePageAction { REFRESH, CHOOSE_HWT, CLEAR_IMPORT_CACHE }
+internal enum class FacePageAction { REFRESH, CHOOSE_HWT, CLEAR_IMPORT_CACHE, DIRECT_INSTALL }
 
 internal data class FaceCardDisabledReason(val key: String, val message: String)
 
@@ -120,6 +122,13 @@ internal object FaceCardPolicy {
             FaceCardAction.REPLACE, FaceCardAction.DELETE -> {
                 if (!face.selectable) return overwriteReason(face, action)
                 if (action == FaceCardAction.REPLACE && state.source == null) return sourceRequired
+                if (action == FaceCardAction.REPLACE && state.source?.replacementAvailable == false)
+                    return FaceCardDisabledReason(
+                        "bin_missing",
+                        if (state.source.payloadKinds.any { it == PayloadKinds.CONTAINER || it == PayloadKinds.STRIPPED })
+                            "XML 格式仅支持 WATCH 系列全能模式直装，不支持替换"
+                        else "该 HWT 未找到可传输的表盘内容",
+                    )
             }
         }
         return null
@@ -206,6 +215,7 @@ internal object FaceCardPolicy {
             FacePageAction.REFRESH -> renderedActions.refreshFaces()
             FacePageAction.CHOOSE_HWT -> pickHwt()
             FacePageAction.CLEAR_IMPORT_CACHE -> renderedActions.clearCache()
+            FacePageAction.DIRECT_INSTALL -> renderedActions.requestDirectInstall()
         }
         return true
     }
@@ -241,7 +251,15 @@ internal object FaceCardPolicy {
     }
 
     private fun pageReason(state: AppUiState, action: FacePageAction): FaceCardDisabledReason? =
-        modalReason(state) ?: if (action == FacePageAction.REFRESH) when {
+        modalReason(state) ?: if (action == FacePageAction.DIRECT_INSTALL) {
+            commonReason(state) ?: when {
+                state.source == null -> sourceRequired
+                state.source.payloadKind !in state.source.payloadKinds || PayloadKinds.mode(state.source.payloadKind) == null || state.source.payloadBytes <= 0 ->
+                    FaceCardDisabledReason("bin_missing", "该 HWT 未找到可传输的表盘内容")
+                state.source.payloadBytes > Core.MAX_MEMBER -> FaceCardDisabledReason("direct_size", "表盘内容超过直接安装的大小上限")
+                else -> null
+            }
+        } else if (action == FacePageAction.REFRESH) when {
             !state.connected -> disconnected
             state.quarantine -> quarantined
             state.listRefreshing -> refreshing

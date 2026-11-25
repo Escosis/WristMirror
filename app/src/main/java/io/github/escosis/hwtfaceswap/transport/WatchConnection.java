@@ -32,6 +32,9 @@ public final class WatchConnection implements LinkChannel.Listener {
     private Listener listener;private LinkChannel channel;private FrameCodec.Decoder decoder=new FrameCodec.Decoder();private LinkCapabilities caps=new LinkCapabilities();private CryptoSession cipher;private IsoAuth iso;private LiteAuth lite;
     private volatile long epoch;private volatile boolean ready;private volatile String phase="IDLE";private volatile String address="";private String huaweiId="";private boolean ble,usedSavedKey;private byte[] selfId,pin,stored;private int rebindCount;private long deadline;private BroadcastReceiver bondReceiver;private long legacyCounter;
     private boolean sessionVerified,initUnconfirmed;private long stageSerial;private int initService=-1,initCommand=-1,nextInit=-1;
+    /** 自动重建计数与用户明确停止标记；只用于传输层失败后的有界重试。 */
+    private int autoRetry;private boolean userStopped;private int savedKeyRejections;
+    private final java.util.concurrent.atomic.AtomicLong connectRequestSerial=new java.util.concurrent.atomic.AtomicLong();
     private final Set<Integer> auxiliaryPending=new HashSet<>();private String deviceName="HUAWEI Watch";
     private DeviceTelemetry.ProbeOwner telemetry;private String observedFirmware,publishedFirmware,observedModel,publishedModel;
     private volatile java.util.function.Predicate<String> pendingRemovalGuard=ignored->false;
@@ -51,6 +54,7 @@ public final class WatchConnection implements LinkChannel.Listener {
     /** 连接批次和每 MAC 清理代次均绑定入队请求；迟到结果不能重建已清除的资料。 */
     public void connectIfEpoch(long expectedEpoch,String mac,boolean bleOnly,String account){enqueueConnect(expectedEpoch,mac,bleOnly,account);}
     private void enqueueConnect(long expectedEpoch,String mac,boolean bleOnly,String account){
+        final long request=connectRequestSerial.incrementAndGet();log.record("CONNECT_REQUEST","request="+request+" source=connect_api expected_epoch_required="+(expectedEpoch>=0)+" transport="+(bleOnly?"gatt":"rfcomm_secure")+" diagnostic_profile=2140-v1");
         if(pendingRemovalGuard.test(mac)){log.record("CONNECT_NOT_QUEUED","pending_target=true");return;}
         final long generation;try{synchronized(io.github.escosis.hwtfaceswap.lifecycle.DeviceRemovalJournal.LOCK){store.removals().requireUsable(mac);generation=store.removals().generation(mac);}}catch(IOException e){log.record("CONNECT_NOT_QUEUED","code="+Core.code(e));return;}
         actor.post(()->{
@@ -60,10 +64,10 @@ public final class WatchConnection implements LinkChannel.Listener {
             connectActor(mac,bleOnly,account);
         });
     }
-    private void connectActor(String mac,boolean bleOnly,String account){rebindCount=0;address=mac;ble=bleOnly;try{huaweiId=account==null||account.trim().isEmpty()?store.huaweiId(mac):account.trim();if(huaweiId.isEmpty())throw new Core.Fault("HUAWEI_INTERNAL_ID_REQUIRED");if(huaweiId.getBytes(StandardCharsets.UTF_8).length>128)throw new Core.Fault("HUAWEI_INTERNAL_ID_TOO_LONG");store.saveHuaweiId(mac,huaweiId);open(false);}catch(SecurityException e){fail("BLUETOOTH_PERMISSION_REQUIRED");}catch(IOException e){fail(Core.code(e));}}
+    private void connectActor(String mac,boolean bleOnly,String account){rebindCount=0;savedKeyRejections=0;userStopped=false;autoRetry=0;address=mac;ble=bleOnly;try{huaweiId=account==null||account.trim().isEmpty()?store.huaweiId(mac):account.trim();if(huaweiId.isEmpty())throw new Core.Fault("HUAWEI_INTERNAL_ID_REQUIRED");if(huaweiId.getBytes(StandardCharsets.UTF_8).length>128)throw new Core.Fault("HUAWEI_INTERNAL_ID_TOO_LONG");store.saveHuaweiId(mac,huaweiId);open(false);}catch(SecurityException e){fail("BLUETOOTH_PERMISSION_REQUIRED");}catch(IOException e){fail(Core.code(e));}}
     @SuppressLint("MissingPermission") private void open(boolean rebinding)throws IOException{
         store.removals().requireUsable(address);
-        final long closingEpoch=epoch;final boolean hadChannel=channel!=null||ready;closeLocal();if(hadChannel&&listener!=null)listener.onClosed(closingEpoch,"CONNECTION_REPLACED");epoch++;ready=false;telemetry=new DeviceTelemetry.ProbeOwner(epoch);legacyCounter=0;caps=new LinkCapabilities();decoder=new FrameCodec.Decoder();selfId=store.identity(address);stored=store.authKey(address);usedSavedKey=stored!=null;pin=null;
+        final long closingEpoch=epoch;final boolean hadChannel=channel!=null||ready;closeLocal();if(hadChannel&&listener!=null)listener.onClosed(closingEpoch,"CONNECTION_REPLACED");epoch++;ready=false;log.deviceContext(null,null);telemetry=new DeviceTelemetry.ProbeOwner(epoch);legacyCounter=0;caps=new LinkCapabilities();decoder=new FrameCodec.Decoder();selfId=store.identity(address);stored=store.authKey(address);usedSavedKey=stored!=null;pin=null;
         BluetoothManager manager=(BluetoothManager)context.getSystemService(Context.BLUETOOTH_SERVICE);BluetoothAdapter adapter=manager==null?null:manager.getAdapter();if(adapter==null||!adapter.isEnabled())throw new Core.Fault("BLUETOOTH_DISABLED");BluetoothDevice device;
         try{device=adapter.getRemoteDevice(address);}catch(IllegalArgumentException e){throw new Core.Fault("DEVICE_ADDRESS_INVALID");}
         final long own=epoch;final String ownAddress=address;stage("CONNECTING",rebinding?"重新进行协议绑定":"正在打开手表通讯通道",20000);tick(own);
@@ -80,16 +84,17 @@ public final class WatchConnection implements LinkChannel.Listener {
         if(Looper.myLooper()!=thread.getLooper())throw new IllegalStateException("UNPAIR_REQUIRES_PROTOCOL_QUEUE");
         if(mac==null||!address.equalsIgnoreCase(mac))return;
         long closingEpoch=epoch;closeLocal();if(caps.serverNonce!=null)Arrays.fill(caps.serverNonce,(byte)0);
+        userStopped=true;autoRetry=0;
         caps=new LinkCapabilities();decoder=new FrameCodec.Decoder();deviceName="HUAWEI Watch";
         address="";huaweiId="";ble=false;usedSavedKey=false;rebindCount=0;legacyCounter=deadline=0;epoch++;
         stage("IDLE","已停止该设备的本应用连接，等待系统解除配对",0);
         if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,"DEVICE_UNPAIR_PENDING");}
     }
-    private void disconnectActor(){long closingEpoch=epoch;closeLocal();epoch++;stage("IDLE","连接已断开",0);if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,"USER_DISCONNECTED");}}
-    public void onOpen(long own,String name){actor.post(()->{if(own!=epoch||store.removals().blocked(address))return;try{try{deviceName=WristInitialization.boundedDeviceName(name);}catch(IOException ignored){deviceName="HUAWEI Watch";}stage("LINK_PARAMS","读取链路参数",15000);sendPlain(1,1,LinkCapabilities.linkRequest());}catch(IOException e){fail(Core.code(e));}});}
+    private void disconnectActor(){userStopped=true;autoRetry=0;long closingEpoch=epoch;closeLocal();epoch++;stage("IDLE","连接已断开",0);if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,"USER_DISCONNECTED");}}
+    public void onOpen(long own,String name){actor.post(()->{if(own!=epoch||store.removals().blocked(address))return;try{try{deviceName=WristInitialization.boundedDeviceName(name);}catch(IOException ignored){deviceName="HUAWEI Watch";}log.deviceContext(deviceName,null);stage("LINK_PARAMS","读取链路参数",15000);sendPlain(1,1,LinkCapabilities.linkRequest());}catch(IOException e){fail(Core.code(e));}});}
     public void onFailure(long own,String error){actor.post(()->{if(own==epoch&&!store.removals().blocked(address))fail(error);});}
     public void onBytes(long own,byte[] bytes){final byte[] data=bytes.clone();actor.post(()->{if(own!=epoch||store.removals().blocked(address))return;try{int before=decoder.errors();List<FrameCodec.Packet> packets=decoder.receive(data,SystemClock.elapsedRealtime());if(decoder.errors()!=before)log.record("FRAME_INVALID","reason="+decoder.lastError()+" count="+decoder.errors());if(decoder.errors()>16)throw new Core.Fault("TOO_MANY_INVALID_FRAMES");for(FrameCodec.Packet p:packets){if(own!=epoch)return;byte[] body=p.body();boolean expected=expectedAuthPacket(p.service,p.command),business=ready&&knownBusinessPacket(p.service,p.command);
-                if(!expected&&!business){log.packet(true,p.service,p.command,body.length,null,false);if(ready&&listener!=null)listener.onPacket(own,p.service,p.command,body,false);continue;}
+                if(!expected&&!business){logUnhandled(p.service,p.command,body);if(ready&&listener!=null)listener.onPacket(own,p.service,p.command,body,false);continue;}
                 boolean encrypted;try{encrypted=CryptoSession.wrapped(body);}catch(IOException e){if(expected)throw e;log.record("RX_NON_TLV_OR_PARTIAL_ENVELOPE_DROPPED","service="+p.service+" command="+p.command+" no_plaintext_downgrade=true");continue;}
                 if(encrypted){if(cipher==null)throw new Core.Fault("ENCRYPTED_BEFORE_SESSION_KEY");body=cipher.open(body);}
                 List<TlvView.Part> fields=null;
@@ -109,10 +114,21 @@ public final class WatchConnection implements LinkChannel.Listener {
     }
     // 本次已查询 01/08 完成后仍验封装/GCM；重复回包不能通过 complete，也不能成为就绪门槛。
     private boolean deviceStatsPacket(int service,int command){return cipher!=null&&DeviceTelemetry.matches(service,command)&&(telemetry!=null&&(telemetry.pending(epoch,service,command)||service==DeviceTelemetry.CONFIG_SERVICE&&command==DeviceTelemetry.BATTERY_COMMAND&&telemetry.batteryQueryClaimed(epoch))||sessionVerified&&ready);}
-    private static boolean knownBusinessPacket(int service,int command){return service==0x27&&(command==1||command==2||command==3||command==5||command==6)||service==0x28&&(command==2||command==3||command==4||command==5||command==7||command==8);}
+    private void logUnhandled(int service,int command,byte[] body){
+        if(service!=0x34||command!=1||!ready){log.packet(true,service,command,body.length,null,false,"envelope_checked=false dispatch=unhandled");return;}
+        boolean encrypted=false;String metadata;
+        try{
+            encrypted=CryptoSession.wrapped(body);byte[] observation=body;
+            if(encrypted){if(cipher==null)throw new Core.Fault("ENCRYPTED_BEFORE_SESSION_KEY");observation=cipher.open(body);}
+            metadata="envelope_checked=true envelope_verified="+encrypted+" "+Wire.p2pMetadata(observation);
+        }catch(IOException e){metadata="p2p_metadata_unavailable=true code="+Core.code(e)+" payload_not_logged=true no_ack=true diagnostics_only=true";}
+        log.packet(true,service,command,body.length,null,encrypted,metadata);
+    }
+    private static boolean knownBusinessPacket(int service,int command){return Wire.businessPacket(service,command);}
+    private static String safeNumberObservation(List<TlvView.Part> fields,int tag){try{return String.valueOf(Wire.number(fields,tag));}catch(IOException ignored){return "invalid";}}
     private void handle(long own,int service,int command,byte[] body,List<TlvView.Part> fields,boolean encrypted)throws IOException{
         if(service==1&&command==1&&phase.equals("LINK_PARAMS")){caps.parseLink(body);stage("DEVICE_STATUS","读取预认证状态",15000);sendPlain(1,0x16,Core.tlv(1,new byte[0]));return;}
-        if(service==1&&command==0x16&&phase.equals("DEVICE_STATUS")){Long error=Wire.number(fields,0x7f);if(error!=null&&error!=0&&error!=100000)throw new Core.Fault("DEVICE_STATUS_ERROR");if(caps.authMode==0)throw new Core.Fault("LEGACY_NORMAL_AUTH_UNSUPPORTED");stage("SECURITY","协商设备认证算法",15000);sendPlain(1,0x33,caps.securityRequest(selfId,Build.MODEL));return;}
+        if(service==1&&command==0x16&&phase.equals("DEVICE_STATUS")){Long error=Wire.number(fields,0x7f),observed=Wire.number(fields,1);long status=DeviceStatusPolicy.status(observed);boolean advisory=DeviceStatusPolicy.advisory(error),cont=DeviceStatusPolicy.mayContinue(status);log.record("DEVICE_STATUS_OBSERVED","error="+error+" status="+safeNumberObservation(fields,1)+" auth_mode="+caps.authMode+" transport="+(ble?"gatt":"rfcomm_secure")+" error_is_advisory="+advisory+" status_gate_only=true continue="+cont+" reference=gadgetbridge_wrist_native");if(advisory)log.record("DEVICE_STATUS_ADVISORY_ERROR","error="+error+" not_a_gate=true no_retry_sent=true reference=gadgetbridge_wrist_native");if(!cont)throw new Core.Fault(DeviceStatusPolicy.stopReason(status));if(caps.authMode==0)throw new Core.Fault("LEGACY_NORMAL_AUTH_UNSUPPORTED");stage("SECURITY","协商设备认证算法",15000);sendPlain(1,0x33,caps.securityRequest(selfId,Build.MODEL));return;}
         if(service==1&&command==0x33&&phase.equals("SECURITY")){caps.parseSecurity(body);if(!caps.iso()&&!caps.lite())throw new Core.Fault("AUTH_TYPE_UNSUPPORTED");if(caps.iso()&&stored!=null)startIso(false,stored);else if(caps.lite()&&caps.authVersion==2)startLite();else requestPin();return;}
         if(service==1&&command==0x2c&&phase.equals("PIN_REQUEST")){
             TlvView.Part ct=Wire.unique(fields,1),iv=Wire.unique(fields,2);byte[] magic=null,decoded=null;
@@ -167,6 +183,7 @@ public final class WatchConnection implements LinkChannel.Listener {
     }
     private void publishDeviceInformation(long own){
         if(own!=epoch||!sessionVerified||!ready||cipher==null||telemetry==null||listener==null)return;
+        log.deviceContext(deviceName,observedFirmware);
         if(observedFirmware!=null&&!observedFirmware.equals(publishedFirmware)){
             publishedFirmware=observedFirmware; // 回调前标记，防止重入重复公开。
             log.record("DEVICE_INFO_OBSERVED","来源=01/07 字段=07 固件有效=true");listener.onDeviceInfo(own,observedFirmware);
@@ -243,7 +260,7 @@ public final class WatchConnection implements LinkChannel.Listener {
         if(!sessionVerified||cipher==null||ready||phase.equals("FAILED")||phase.equals("IDLE"))throw new Core.Fault("INITIALIZATION_SESSION_REQUIRED");
         switch(step){
             case 0:if(caps.hasCommand(1,0x37)){initRequest("EXPAND_CAPS","读取扩展能力",1,0x37,Core.tlv(1,new byte[0]),1,true);return;}skipped("EXPAND_CAPS");advanceInit(1);return;
-            case 1:if(caps.accountSupported()&&!huaweiId.isEmpty()){initRequest("ACCOUNT","附送华为 ID",0x1a,5,caps.accountRequest(huaweiId),2,true);return;}skipped("ACCOUNT");advanceInit(2);return;
+            case 1:if(caps.accountSupported()&&!huaweiId.isEmpty()){initRequest("ACCOUNT","附送内部账户 ID",0x1a,5,caps.accountRequest(huaweiId),2,true);return;}skipped("ACCOUNT");advanceInit(2);return;
             case 2:if(caps.hasCommand(1,0x31)){initRequest("SETTINGS","读取初始化设置项",1,0x31,WristInitialization.settingsRequest(),3,true);return;}skipped("SETTINGS");advanceInit(3);return;
             case 3:if(caps.hasCommand(1,0x30)){stage("AGREEMENT_CONFIRM","继续完成连接初始化",120000);return;}skipped("AGREEMENTS");advanceInit(4);return;
             case 4:if(caps.hasCommand(1,0x3f)){initRequest("REVERSE_CAPS","发送原协议反向能力声明",1,0x3f,WristInitialization.reverseRequest(),5,true);return;}skipped("REVERSE_CAPS");advanceInit(5);return;
@@ -266,7 +283,7 @@ public final class WatchConnection implements LinkChannel.Listener {
         if(!sessionVerified||cipher==null)throw new Core.Fault("VERIFIED_SESSION_REQUIRED");if(ready)return;
         final long own=epoch;
         final boolean storageProbe=telemetry!=null&&telemetry.markReadyStorageRequest(own,sessionVerified,true,caps.hasService(DeviceTelemetry.MUSIC_SERVICE)&&caps.hasCommand(DeviceTelemetry.MUSIC_SERVICE,DeviceTelemetry.MUSIC_STORAGE_COMMAND));
-        ready=true;initService=initCommand=nextInit=-1;
+        ready=true;initService=initCommand=nextInit=-1;autoRetry=0;savedKeyRejections=0;
         log.record("INITIALIZATION_COMPLETE","session_verified=true optional_unconfirmed="+initUnconfirmed+" coexistence_verified=false");
         stage("READY",initUnconfirmed?"连接已就绪，部分初始化回执待确认":"连接初始化完成",0);if(listener!=null)listener.onReady(own,caps);
         publishDeviceInformation(own);
@@ -293,6 +310,55 @@ public final class WatchConnection implements LinkChannel.Listener {
     private void send(int service,int command,byte[] body,boolean encrypt)throws IOException{store.removals().requireUsable(address);if(channel==null)throw new Core.Fault("CHANNEL_NOT_READY");byte[] payload=encrypt?cipher.seal(body):body;List<TlvView.Part> p=null;try{p=TlvView.decode(body);}catch(IOException ignored){}log.packet(false,service,command,body.length,p,encrypt);channel.send(FrameCodec.encode(service,command,payload,caps.sliceSize),caps.mtu,caps.intervalMs);}
     private void tick(long own){actor.postDelayed(()->{if(epoch!=own||phase.equals("IDLE")||phase.equals("FAILED"))return;if(deadline!=0&&SystemClock.elapsedRealtime()>deadline){fail("CONNECTION_STAGE_TIMEOUT_"+phase);return;}tick(own);},1000);}
     public void protocolFailure(String code){if(Looper.myLooper()==thread.getLooper())fail(code);else actor.post(()->fail(code));}
-    private void fail(String code){long closingEpoch=epoch;log.record("LINK_FAILED","code="+code);closeLocal();ready=false;epoch++;stage("FAILED",code,0);if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,code);}}
+    private void fail(String code){if(escalateRebind(code))return;long closingEpoch=epoch;log.record("LINK_FAILED","code="+code);closeLocal();ready=false;epoch++;stage("FAILED",code,0);if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,code);}scheduleRecovery(code);}
+    /** 连续使用已存密钥被拒达到阈值后，改为提供一次需要用户确认的重新绑定入口，不再只报失败。 */
+    private boolean escalateRebind(String code){
+        if(!RebindPolicy.savedKeyRejection(code)||!usedSavedKey||rebindCount!=0||address==null||address.isEmpty())return false;
+        ++savedKeyRejections;
+        if(!RebindPolicy.reached(savedKeyRejections))return false;
+        log.record("REBIND_OFFERED","cause="+code+" saved_key_rejections="+savedKeyRejections+" threshold="+RebindPolicy.THRESHOLD+" no_device_write=true");
+        long closingEpoch=epoch;closeLocal();ready=false;epoch++;
+        stage("REBIND_CONFIRM","连续连接失败，建议重新协议绑定",120000);
+        if(listener!=null){listener.onPin(false,"");listener.onClosed(closingEpoch,code);
+            listener.onRebind("已连续 "+savedKeyRejections+" 次连接被设备拒绝，手表可能已不在原来的协议绑定状态（例如切换了省电/全能模式）。重新绑定会更换本应用与手表的协议密钥，可能影响手表与其他应用的连接关系，是否继续？");}
+        return true;
+    }
+    /** 页面按钮：显式给 MAC 重新绑定；先清本应用持久协议密钥，再走一次完整 open(rebinding)。 */
+    public void rebind(String mac,boolean bleOnly){
+        // companion 里的 canonicalAddress 不是 @JvmStatic，这里按同一规则本地规范化。
+        final String target=mac!=null&&mac.matches("(?i)[0-9a-f]{2}(?::[0-9a-f]{2}){5}")?mac.toUpperCase(java.util.Locale.ROOT):null;
+        actor.post(()->{
+            if(target==null){fail("DEVICE_ADDRESS_INVALID");return;}
+            if(store.removals().blocked(target)){log.record("REBIND_NOT_STARTED","reason=pending_removal");return;}
+            try{store.removals().requireUsable(target);}catch(IOException e){log.record("REBIND_NOT_STARTED","code="+Core.code(e));return;}
+            if((!ready&&!phase.equals("IDLE")&&!phase.equals("FAILED"))||(!address.isEmpty()&&!address.equalsIgnoreCase(target))){closeLocal();ready=false;}
+            final long own=++epoch;address=target;ble=bleOnly;rebindCount=1;savedKeyRejections=0;
+            userStopped=false;autoRetry=0;
+            try{huaweiId=store.huaweiId(target);if(huaweiId==null||huaweiId.trim().isEmpty())throw new Core.Fault("HUAWEI_INTERNAL_ID_REQUIRED");}catch(IOException e){fail(Core.code(e));return;}
+            try{
+                log.record("REBIND_REQUESTED","source=page_button user_consented=true force=true no_auto_retry=true");
+                store.clearAuthKey(target);closeLocal();ready=false;
+                stage("REBINDING","正在重新绑定手表",15000);
+                final String targetAddress=address;
+                actor.postDelayed(()->{if(epoch!=own||!phase.equals("REBINDING")||!targetAddress.equalsIgnoreCase(address))return;
+                    try{open(true);}catch(SecurityException e){fail("BLUETOOTH_PERMISSION_REQUIRED");}catch(IOException e){fail(Core.code(e));}},800);
+            }catch(IOException e){fail(Core.code(e));}
+        });
+    }
+    /**
+     * 与腕连一致的两次有界恢复：800 ms 一次、1200 ms 一次，第三次只明确失败。
+     * 只对传输层失败生效；用户明确断开、待解除配对或协议语义失败一律不自动重建。
+     */
+    private void scheduleRecovery(String code){
+        if(autoRetry>=ConnectionRecovery.MAX_ATTEMPTS)return;
+        if(userStopped||code==null||!ConnectionRecovery.retryable(code))return;
+        if(address==null||address.isEmpty()||store.removals().blocked(address))return;
+        final int attempt=++autoRetry;final long delay=ConnectionRecovery.delayMs(attempt);final long own=epoch;
+        log.record("AUTO_RECONNECT_SCHEDULED","attempt="+attempt+" of="+ConnectionRecovery.MAX_ATTEMPTS+" delay_ms="+delay+" cause="+ConnectionRecovery.cause(code)+" user_stopped=false");
+        actor.postDelayed(()->{
+            if(own!=epoch||userStopped||store.removals().blocked(address)){log.record("AUTO_RECONNECT_CANCELLED","attempt="+attempt+" reason=epoch_or_removal_changed");return;}
+            try{open(false);}catch(SecurityException e){fail("BLUETOOTH_PERMISSION_REQUIRED");}catch(IOException e){fail(Core.code(e));}
+        },delay);
+    }
     private void closeLocal(){unregisterBond();ready=false;sessionVerified=false;initService=initCommand=nextInit=-1;auxiliaryPending.clear();telemetry=null;observedFirmware=publishedFirmware=observedModel=publishedModel=null;stageSerial++;if(channel!=null)channel.close();channel=null;if(cipher!=null)cipher.close();cipher=null;if(iso!=null)iso.close();iso=null;if(lite!=null)lite.close();lite=null;for(byte[] b:new byte[][]{stored,selfId,pin})if(b!=null)Arrays.fill(b,(byte)0);stored=null;selfId=null;pin=null;decoder.clear();}
 }

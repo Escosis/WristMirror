@@ -36,9 +36,11 @@ public final class NameQueryState {
     private final ArrayDeque<TlvView.Face> pending=new ArrayDeque<TlvView.Face>();
     private final Set<String> sentIds=new LinkedHashSet<String>();
     private final Set<String> remainingIds=new LinkedHashSet<String>();
+    private final Set<String> answeredIds=new LinkedHashSet<String>();
     private long serial;
     private Batch current;
     private boolean cancelled;
+    private int unanswered;
 
     /**
      * knownKeys contains cached ID_version names. Only valid resources count: an ID is
@@ -50,14 +52,14 @@ public final class NameQueryState {
     public NameQueryState(List<TlvView.Face> faces,Set<String> knownKeys) throws IOException {
         if(faces==null)throw new Core.Fault("NAMES_QUERY_FACES_REQUIRED");
         if(faces.size()>TlvView.MAX_FIELDS)throw new Core.Fault("NAMES_QUERY_FIELDS_LIMIT");
-        LinkedHashMap<String,TlvView.Face> representatives=new LinkedHashMap<String,TlvView.Face>();
+        LinkedHashMap<String,TlvView.Face> reps=new LinkedHashMap<String,TlvView.Face>();
         Set<String> unknownIds=new LinkedHashSet<String>();
         for(TlvView.Face face:faces){
             if(face==null || !face.validResource())continue;
-            if(!representatives.containsKey(face.id))representatives.put(face.id,face);
+            if(!reps.containsKey(face.id))reps.put(face.id,face);
             if(knownKeys==null || !knownKeys.contains(face.id+"_"+face.version))unknownIds.add(face.id);
         }
-        for(Map.Entry<String,TlvView.Face> entry:representatives.entrySet())
+        for(Map.Entry<String,TlvView.Face> entry:reps.entrySet())
             if(unknownIds.contains(entry.getKey()))pending.addLast(entry.getValue());
     }
 
@@ -82,8 +84,9 @@ public final class NameQueryState {
 
     /**
      * Matches names only for this state's actually sent IDs. Valid reported IDs without
-     * names also complete their current-batch slots. Partial replies keep the same Batch
-     * and serial; late earlier-batch names are useful but cannot advance a disjoint batch.
+     * names also count as answered. 0622/0627 日志：手表对每条 27/06 只回一次（60–110 ms），
+     * 且只回它确实保存了名字的 ID（16 个 ID 回 3 个）。因此任何回包都结束当前批次：
+     * 继续等待未回包的 ID 只是把可选查询拖成 8 s 超时，再从子集补查一次更不被回答。
      * A null response or any response after cancel has no effect and yields an empty map.
      */
     public Map<String,String> accept(WireNames.Response response) {
@@ -91,15 +94,24 @@ public final class NameQueryState {
         LinkedHashMap<String,String> matched=new LinkedHashMap<String,String>();
         for(Map.Entry<String,String> entry:response.names.entrySet())
             if(sentIds.contains(entry.getKey()))matched.put(entry.getKey(),entry.getValue());
+        for(String id:response.ids)answeredIds.add(id);
         if(current!=null){
-            remainingIds.removeAll(response.ids);
-            if(remainingIds.isEmpty())current=null;
+            boolean mentioned=false;
+            for(String id:response.ids)if(remainingIds.contains(id)){mentioned=true;break;}
+            if(mentioned){
+                remainingIds.removeAll(response.ids);
+                unanswered=remainingIds.size();
+                current=null;remainingIds.clear();
+            }
         }
         return Collections.unmodifiableMap(matched);
     }
 
+    /** 最近一次回包中没有名字的已发送 ID 数；只用于诊断，绝不据此再发查询。 */
+    public int unanswered(){return unanswered;}
+
     /** Abandons only the current batch; the next unsent IDs can continue, without retry. */
-    public void failCurrent() { current=null;remainingIds.clear(); }
+    public void failCurrent() { current=null;remainingIds.clear();unanswered=0; }
 
     /** Clears a current batch iff at least 8s elapsed; backward timestamps do not expire. */
     public boolean expire(long now) {
@@ -115,6 +127,6 @@ public final class NameQueryState {
 
     /** Terminal: releases retained work and refuses both names and new batches. */
     public void cancel() {
-        cancelled=true;pending.clear();sentIds.clear();failCurrent();
+        cancelled=true;pending.clear();sentIds.clear();answeredIds.clear();failCurrent();
     }
 }

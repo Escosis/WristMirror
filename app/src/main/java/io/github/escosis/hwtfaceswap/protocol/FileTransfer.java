@@ -20,17 +20,15 @@ import java.util.List;
 /**
  * 固定的单一 BIN 载荷，仅使用原生服务 0x28 的数据体。
  *
- * 调用方负责授权（27/03）、连接与来源批次、数据包解密、CryptoSession.seal、
- * 帧封装、套接字写入 MTU、写入与 ACK 的关联以及截止时间。
- * 此处准备字节不等于套接字写入，也不能证明安装成功。尤其是 peerComplete，
- * 仅表示明确关联的 28/07 结果为 1 且本机固定载荷完整；不代表套接字写入、
- * 27/report 或列表核验。02 登记 ID 后，即使尚未准备数据，
- * 也可能观察到提前返回或缓存命中的结果。
- *
- * 原生实现按 02 的 filename/type/04 登记所分配的 ID；03 可选，
- * 仅 check_mode 3 请求完整 SHA。协商 tag02 是未使用的 protocolVersion，
- * 不是文件名。阶段限制、必需字段检查及有限处理预算属于本地安全策略，
- * 并非设备能力实测；不把观察到的数值推定为设备能力上限。
+ * 替换沿用Health/Unite已验证合同；DIRECT_INSTALL走腕连native合同。
+ * 调用方负责操作入口、会话/任务归属、解密、CryptoSession.seal、帧封装、
+ * 套接字写入和ACK派发与截止时间。准备字节不等于套接字写入或安装成功。
+ * peerComplete在替换表示明确关联的raw1及本地完整性；在直装仅表示
+ * 收到07并准备ACK、完成本地快照核验，raw只是观察，不是安装判值。
+ * 直装接受metadata默认0/100000，已存在码转应用；03总回全SHA，03/04取得ID，
+ * 06校验错误码，07不以raw判结果。替换03只check_mode3并支持suffix SHA。
+ * 文件归属、字段去重、阶段/范围/内存预算及冻结校验是本地额外防护，
+ * 不是腕连必需合同或设备能力实测；不把数值推定为设备能力上限。
  * 此处不含 Android、源文件改写、重试计时器、授权或加密实现。
  */
 public final class FileTransfer implements Closeable {
@@ -62,6 +60,9 @@ public final class FileTransfer implements Closeable {
         TRANSFERRING, WAIT_PEER_RESULT, RESULT_OBSERVED, PEER_COMPLETE, FAILED, CLOSED
     }
 
+    public enum Route { REPLACEMENT, DIRECT_INSTALL }
+
+    private final boolean directInstall;
     private final HwtSource.Snapshot frozen;
     private final File frozenFile;
     private final FileIdentity frozenIdentity;
@@ -89,13 +90,29 @@ public final class FileTransfer implements Closeable {
     private boolean resultObserved;
     private String completionFailure;
     private boolean resultAckAfterFailure;
+    private boolean existingResource;
+    public synchronized boolean existingResource() { return existingResource; }
+    // 设备在文件信息阶段给出的明确容量/数量拒绝；0 表示没有观察到这类码。
+    private long infoRefusal;
+    public synchronized long infoRefusal() { return infoRefusal; }
     private static final int FAILURE_CODE_LIMIT = 96;
 
     public FileTransfer(String id, String installedProtocolVersion, HwtSource.Snapshot frozen)
             throws IOException {
+        this(id, installedProtocolVersion, frozen, Route.REPLACEMENT);
+    }
+
+    public FileTransfer(String id, String installedProtocolVersion, HwtSource.Snapshot frozen, Route route)
+            throws IOException {
         Core.resource(id, installedProtocolVersion);
+        if (route == null) throw new Core.Fault("FILE_TRANSFER_ROUTE_REQUIRED");
+        this.directInstall = route == Route.DIRECT_INSTALL;
+        // 两条路线都传输解析出的表盘内容，而不是外层 HWT ZIP 容器。
         if (frozen == null || frozen.source == null || frozen.file == null
-                || frozen.mode != HwtSource.Mode.BIN) {
+                || !supportedPayloadMode(frozen.mode)) {
+            throw new Core.Fault("FILE_TRANSFER_FROZEN_PAYLOAD_REQUIRED");
+        }
+        if (!directInstall && frozen.mode != HwtSource.Mode.BIN) {
             throw new Core.Fault("FILE_TRANSFER_FROZEN_BIN_REQUIRED");
         }
         if (frozen.size <= 0 || frozen.size > Core.MAX_MEMBER) {
@@ -103,6 +120,9 @@ public final class FileTransfer implements Closeable {
         }
         if (frozen.hash == null || frozen.hash.length() != 64) {
             throw new Core.Fault("FILE_TRANSFER_SNAPSHOT_HASH_INVALID");
+        }
+        if (!frozen.source.matchesPayload(frozen)) {
+            throw new Core.Fault(directInstall ? "FILE_TRANSFER_PARSED_PAYLOAD_REQUIRED" : "FILE_TRANSFER_FROZEN_BIN_REQUIRED");
         }
         this.sha256 = Core.unhex(frozen.hash);
         this.frozen = frozen;
@@ -113,6 +133,9 @@ public final class FileTransfer implements Closeable {
             throw new Core.Fault("FILE_TRANSFER_PRIVATE_SNAPSHOT_REQUIRED");
         }
         this.frozenIdentity = readFileIdentity();
+        if (directInstall && (!id.matches("[0-9]{9}") || !"1.0.0".equals(installedProtocolVersion))) {
+            throw new Core.Fault("DIRECT_HWT_FILENAME_CONTRACT_INVALID");
+        }
         this.filename = (id + "_" + installedProtocolVersion).getBytes(StandardCharsets.US_ASCII);
         this.metadata = makeMetadata(id, installedProtocolVersion);
         this.preparedByteBudget = PREPARED_BYTE_MULTIPLIER * (long) size + Core.MAX_CHUNK;
@@ -137,6 +160,11 @@ public final class FileTransfer implements Closeable {
             closeInput(failure);
             throw failure;
         }
+    }
+
+    private static boolean supportedPayloadMode(HwtSource.Mode mode) {
+        return mode == HwtSource.Mode.BIN || mode == HwtSource.Mode.CONTAINER
+                || mode == HwtSource.Mode.CONTAINER_NO_BIN;
     }
 
     /**
@@ -187,8 +215,8 @@ public final class FileTransfer implements Closeable {
                 case 0x03: return hashRequest(fields(body));
                 case 0x04: return consult(fields(body));
                 case 0x05: return window(fields(body), transactionsCrypted);
-                // 原生接收分派将 06 留在默认分支；它不是 ACK 条件。
-                case 0x06: return Collections.emptyList();
+                // Replacement keeps the previously verified Health/Unite dispatch contract.
+                case 0x06: return directInstall ? directChunkAck(fields(body)) : Collections.emptyList();
                 case 0x07: return result(fields(body));
                 default: return Collections.emptyList(); // 未知命令绝不视为 ACK 或完成。
             }
@@ -199,6 +227,27 @@ public final class FileTransfer implements Closeable {
     }
 
     private List<Outgoing> infoReply(List<TlvView.Part> fields) throws IOException {
+        if (directInstall) {
+            TlvView.Part name = Wire.unique(fields, 1), type = Wire.unique(fields, 3);
+            // Explicit foreign identity remains a local single-task ownership guard.
+            if ((name != null && !Arrays.equals(name.value, filename)) ||
+                    (type != null && metadataByteNumber(type) != 1)) return Collections.emptyList();
+            requireStage(Stage.WAIT_INFO);
+            long code = wristError(fields);
+            if (code == 140008 || code == 100008) {
+                verifyFrozen(); existingResource = true; stage = Stage.RESULT_OBSERVED;
+                return Collections.emptyList();
+            }
+            if (code != 0 && code != SUCCESS) {
+                // 设备明确说“文件受限/空间不足”时先记下码：这是终局拒绝而非协议歧义。
+                if (DeviceRefusal.known(code)) infoRefusal = code;
+                throw new Core.Fault("FILE_TRANSFER_INFO_ERROR_" + code);
+            }
+            TlvView.Part id = Wire.unique(fields, 4);
+            currentFileId = id == null ? 0 : metadataByteNumber(id);
+            stage = Stage.WAIT_CONSULT;
+            return Collections.emptyList();
+        }
         TlvView.Part name = required(fields, 0x01);
         int type = metadataByteNumber(required(fields, 0x03));
         // 原生任务标识是文件名加文件类型，不是后续的 protocolVersion。
@@ -208,7 +257,11 @@ public final class FileTransfer implements Closeable {
         int assignedId = metadataByteNumber(required(fields, 0x04));
         long code = fixedNumber(required(fields, 0x7f), 4);
         // Health 为100000，腕连原metadata分支也接受明确0；不采用其缺失/短header默认0。
-        if (code != SUCCESS && code != 0) throw new Core.Fault("FILE_TRANSFER_INFO_ERROR_" + code);
+        if (code != SUCCESS && code != 0) {
+            // 替换路线同样可能被设备以容量/数量拒绝；记录码供管理器区分终局拒绝与协议歧义。
+            if (DeviceRefusal.known(code)) infoRefusal = code;
+            throw new Core.Fault("FILE_TRANSFER_INFO_ERROR_" + code);
+        }
         // Unite 将 ID 默认为 -1，Classic 默认为 0；两者都不能证明缺失的 04 表示 ID 0。
         currentFileId = assignedId;
         stage = Stage.WAIT_CONSULT;
@@ -217,6 +270,15 @@ public final class FileTransfer implements Closeable {
 
     private List<Outgoing> hashRequest(List<TlvView.Part> fields) throws IOException {
         requireRegistered();
+        if (directInstall) {
+            if (stage == Stage.PEER_COMPLETE || stage == Stage.RESULT_OBSERVED) return Collections.emptyList();
+            TlvView.Part id = Wire.unique(fields, 1);
+            currentFileId = id == null ? 0 : metadataByteNumber(id);
+            verifyFrozen();
+            ByteArrayOutputStream response = new ByteArrayOutputStream();
+            append(response, 1, new byte[]{(byte)currentFileId}); append(response, 3, sha256);
+            return Collections.singletonList(new Outgoing(3, response.toByteArray(), true));
+        }
         if (!associatedId(fields)) return Collections.emptyList();
         // 原生任务在协商及数据阶段保持存在，正常 07 完成后才清理。
         if (peerResultRaw != null || stage == Stage.PEER_COMPLETE || stage == Stage.RESULT_OBSERVED) return Collections.emptyList();
@@ -238,7 +300,10 @@ public final class FileTransfer implements Closeable {
 
     private List<Outgoing> consult(List<TlvView.Part> fields) throws IOException {
         requireRegistered();
-        if (!associatedId(fields)) return Collections.emptyList();
+        if (directInstall) {
+            TlvView.Part id = Wire.unique(fields, 1);
+            currentFileId = id == null ? 0 : metadataByteNumber(id);
+        } else if (!associatedId(fields)) return Collections.emptyList();
         // 原生协商映射在每次有效的同 ID 04 回包时替换参数，
         // 包括重传；原生实现没有 WAIT_CONSULT 或首次发送的阶段条件。
         // 原生 04/02 是 protocolVersion（默认空），仅设置，分块与加密处理不读取它；
@@ -317,6 +382,20 @@ public final class FileTransfer implements Closeable {
         return Collections.unmodifiableList(outgoing);
     }
 
+    private static long wristError(List<TlvView.Part> fields) throws IOException {
+        TlvView.Part p = Wire.unique(fields, 0x7f);
+        if (p == null || p.value.length < 4) return 0;
+        int value = 0; for (int i = 0; i < 4; i++) value = (value << 8) | (p.value[i] & 255);
+        return value;
+    }
+    private List<Outgoing> directChunkAck(List<TlvView.Part> fields) throws IOException {
+        requireRegistered();
+        if (!optionalAssociatedId(fields)) return Collections.emptyList();
+        long error = wristError(fields);
+        if (error != 0 && error != SUCCESS) throw new Core.Fault("FILE_TRANSFER_DATA_ERROR_" + error);
+        return Collections.emptyList();
+    }
+
     private List<Outgoing> result(List<TlvView.Part> fields) throws IOException {
         requireRegistered();
         if (!associatedId(fields)) return Collections.emptyList();
@@ -328,6 +407,15 @@ public final class FileTransfer implements Closeable {
         resultObserved = true;
         peerResultRaw = value;
         if (completionFailure == null) { complete = false; stage = Stage.RESULT_OBSERVED; }
+        if (directInstall) {
+            // Wrist native w0.D does not branch on 28/07 tag2. Receipt + ACK ends
+            // its file task; retain the raw value for diagnostics, not as an install verdict.
+            if (completionFailure == null) {
+                try { verifyFrozen(); complete = true; stage = Stage.PEER_COMPLETE; }
+                catch (IOException integrityFailure) { resultFailure(integrityFailure); }
+            }
+            return Collections.singletonList(reply);
+        }
         if (value == null) {
             resultFailure(new Core.Fault("FILE_TRANSFER_REQUIRED_TAG_2"));
         } else if (value.intValue() == 0) {

@@ -14,11 +14,16 @@ import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import io.github.escosis.hwtfaceswap.protocol.ConnectionRecovery
 import io.github.escosis.hwtfaceswap.protocol.Core
+import io.github.escosis.hwtfaceswap.protocol.DirectInstallState
 import io.github.escosis.hwtfaceswap.protocol.FacePolicy
 import io.github.escosis.hwtfaceswap.protocol.HwtSource
+import io.github.escosis.hwtfaceswap.protocol.PayloadKinds
 import io.github.escosis.hwtfaceswap.protocol.TlvView
 import io.github.escosis.hwtfaceswap.protocol.VersionPolicy
+import io.github.escosis.hwtfaceswap.ui.OperationFailureText
+import io.github.escosis.hwtfaceswap.ui.PayloadSelectionPolicy
 import io.github.escosis.hwtfaceswap.store.SavedWatchStore
 import io.github.escosis.hwtfaceswap.lifecycle.DeviceRemovalController
 import io.github.escosis.hwtfaceswap.lifecycle.DeviceRemovalJournal
@@ -40,9 +45,16 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private val tokens = AtomicLong(System.nanoTime())
     private val prefs = app.getSharedPreferences("ui", Application.MODE_PRIVATE)
     private val savedWatches = SavedWatchStore(app)
+    // Include install time so an update installed with the same version code also shows the guide once.
+    private val introductionInstall = runCatching {
+        val info = app.packageManager.getPackageInfo(app.packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
+        "$code:${info.lastUpdateTime}"
+    }.getOrDefault("unknown")
     private val introductionRead = IntroductionReadMarker(prefs,
-        { prefs.getBoolean(IntroductionReadMarker.KEY, false) },
-        { prefs.edit().putBoolean(IntroductionReadMarker.KEY, true).commit() })
+        { IntroductionReadMarker.isCurrentInstallation(prefs.getString(IntroductionReadMarker.INSTALLATION_KEY, null), introductionInstall) },
+        { prefs.edit().putBoolean(IntroductionReadMarker.KEY, true)
+            .putString(IntroductionReadMarker.INSTALLATION_KEY, introductionInstall).commit() })
     private val mutable = MutableStateFlow(AppUiState(
         theme = runCatching { ThemeMode.valueOf(prefs.getString("theme", "SYSTEM")!!) }.getOrDefault(ThemeMode.SYSTEM),
         introductionPending = !introductionRead.isAcknowledged(),
@@ -63,7 +75,8 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     private var scanGeneration = 0L
     private var filePickToken: Long? = null
     private var source: HwtSource? = null
-    private var sourcePayload: HwtSource.Snapshot? = null
+    private var sourcePayloads: Map<HwtSource.Mode, HwtSource.Snapshot> = emptyMap()
+    private var chosenPayloadKind: String? = null
     private var fileOnlyPreview = false
     private var startingOperation: QueuedStart? = null
     private var preparing = false
@@ -221,7 +234,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
                 connectionFormRevision = old.connectionFormRevision + if(selectedMatches) 1L else 0L) }
         }
         mutable.update { it.copy(unpairing = s.pending, unpairWorking = s.working, unpairToken = s.token, unpairAddress = address,
-            unpairMessage = removalUiMessage(s), unpairNeedsSettings = s.needsSettings) }
+            unpairMessage = removalUiMessage(s), unpairNeedsSettings = s.needsSettings, unpairCancelable = runtime.unpair.cancelable()) }
     }
     // 只缩短界面说明；Controller 的原始原因、日志与状态判据保持不变。
     private fun removalUiMessage(s: DeviceRemovalController.Snapshot): String {
@@ -256,22 +269,25 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         "READY" -> "连接就绪"
         else -> "连接未完成"
     }
-    private fun operationLabel(kind: String, stage: String, active: Boolean, failed: Boolean): String = when(stage) {
-        "LISTED" -> if(!active && !failed) "表盘已替换" else if(failed) "替换结果未确认" else "正在核对替换结果"
+    private fun operationLabel(kind: String, stage: String, active: Boolean, failed: Boolean, metadata: String = ""): String = when(stage) {
+        "COMPLETED" -> DirectInstallState.completionNotice(metadata)
+        "LISTED" -> if(kind == "direct_install") {
+            if(!active && !failed) "表盘已安装" else if(failed) "安装结果未确认" else "正在核对安装结果"
+        } else if(!active && !failed) "表盘已替换" else if(failed) "替换结果未确认" else "正在核对替换结果"
         "DELETED" -> if(!active && !failed) "表盘已删除" else if(failed) "删除结果未确认" else "正在核对删除结果"
         "ACTIVATED" -> if(!active && !failed) "表盘已启用" else if(failed) "启用结果未确认" else "正在核对启用结果"
         "NO_TRANSFER" -> "设备未要求文件，本次未传输"
         "PRECHECK_FAILED" -> if(kind == "deletion") "删除未开始，尚未向手表发送指令" else if(kind == "activation") "启用未开始，请刷新后重试" else "替换未开始，尚未向手表发送指令"
         "TIMED_OUT" -> "操作超时，请重新连接并查询"
-        "FAILED", "CANCELLED" -> "操作未可靠完成，请重新连接并查询"
+        "FAILED", "CANCELLED" -> OperationFailureText.forReason(metadata) ?: "操作未可靠完成，请重新连接并查询"
         "WAIT_OPERATION", "WAIT_DEVICE" -> "等待设备接受回执"
         "TRANSFERRING" -> "传输原始内容"
-        "WAIT_REPORT", "WAIT_POST" -> "等待手表报告与应用确认"
+        "WAIT_REPORT", "WAIT_POST" -> "等待手表报告与应用确认（最长30秒）"
         "WAIT_LIST" -> if(kind == "deletion") "核对删除后的两次新列表" else if(kind == "activation") "核对当前表盘" else "核对新版本列表"
         else -> stage
     }
     private fun replacementIdentityMatches(dialog: ReplacementDialogInfo?, identity: WatchfaceManager.ReplacementIdentity?): Boolean =
-        dialog != null && dialog.operation.kind == "replacement" && identity != null && dialog.token == identity.token && dialog.connectionEpoch == identity.epoch &&
+        dialog != null && identity != null && dialog.operation.kind == (if(identity.directInstall) "direct_install" else "replacement") && dialog.token == identity.token && dialog.connectionEpoch == identity.epoch &&
             dialog.targetId == identity.id && dialog.targetVersion == identity.version
     private fun deletionIdentityMatches(dialog: ReplacementDialogInfo?, identity: WatchfaceManager.DeletionIdentity?): Boolean =
         dialog != null && dialog.operation.kind == "deletion" && identity != null && dialog.token == identity.token && dialog.connectionEpoch == identity.epoch &&
@@ -286,10 +302,10 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!replacementIdentityMatches(dialog, s.replacementDialogIdentity)) return null
         val operation = dialog.operation
         val detail = when {
-            operation.stage == "PRECHECK_FAILED" -> replacementError(operation.detail)
+            operation.stage == "PRECHECK_FAILED" -> if(operation.kind == "direct_install") "安装未开始：${operation.detail}" else replacementError(operation.detail)
             operation.stage == "CANCELLED" && operation.detail == "USER_CANCELLED_BEFORE_SEND" -> "替换已取消，尚未向手表发送指令"
             operation.stage == "CANCELLED" -> "替换已取消，请重新连接并查询"
-            else -> operationLabel(operation.kind, operation.stage, operation.active, operation.failed)
+            else -> operationLabel(operation.kind, operation.stage, operation.active, operation.failed, operation.detail)
         }
         return dialog.copy(operation = operation.copy(detail = detail))
     }
@@ -298,7 +314,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!deletionIdentityMatches(dialog, s.deletionDialogIdentity)) return null
         val operation = dialog.operation
         val detail = if(operation.stage == "PRECHECK_FAILED") deletionError(operation.detail)
-            else operationLabel(operation.kind, operation.stage, operation.active, operation.failed)
+            else operationLabel(operation.kind, operation.stage, operation.active, operation.failed, operation.detail)
         return dialog.copy(fileName = "", operation = operation.copy(detail = detail), interruptRequested = false)
     }
     private fun activationDialog(s: AppRuntime.Snapshot): ReplacementDialogInfo? {
@@ -306,7 +322,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(!activationIdentityMatches(dialog, s.activationDialogIdentity)) return null
         val operation = dialog.operation
         val detail = if(operation.stage == "PRECHECK_FAILED") activationError(operation.detail)
-            else operationLabel(operation.kind, operation.stage, operation.active, operation.failed)
+            else operationLabel(operation.kind, operation.stage, operation.active, operation.failed, operation.detail)
         return dialog.copy(fileName = "", operation = operation.copy(detail = detail), interruptRequested = false)
     }
     private fun apply(s: AppRuntime.Snapshot) {
@@ -341,7 +357,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             queuedStart != null -> OperationInfo(queuedStart.kind, "WAIT_OPERATION", if(queuedStart.kind == "deletion") "正在开始删除" else "正在开始替换", null, true, false)
             dialog != null && (dialog.operation.active || !s.active) -> dialog.operation
             fileOnlyPreview && !s.active && !s.failed -> OperationInfo()
-            else -> OperationInfo(s.kind, s.stage, operationLabel(s.kind, s.stage, s.active, s.failed), s.progress, s.active, s.failed)
+            else -> OperationInfo(s.kind, s.stage, operationLabel(s.kind, s.stage, s.active, s.failed, s.operationDetail), s.progress, s.active, s.failed)
         }
         // 就绪状态优先于本地排队标记，连接完成后不再保留“正在连接”。
         if(s.ready) queuedConnectEpoch = null
@@ -356,6 +372,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             selectedId = null, operation = op, replacementDialog = replacement, deletionDialog = deletion, activationDialog = activation, needsPin = s.needsPin, pinMessage = s.pinMessage,
             rebindCount = s.rebind, quarantine = (s.failed && !s.ready) || runtime.watchfaces.reconnectRequired(s.epoch),
             statusMessage = when {
+                s.message == "WIRE_FACE_LIST_INCOMPLETE" -> runtimeError(s.kind, s.stage, s.message)
                 s.kind == "replacement" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> replacementError(s.message)
                 s.kind == "deletion" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> deletionError(s.message)
                 s.kind == "activation" && s.stage == "PRECHECK_FAILED" && s.message.isNotBlank() -> activationError(s.message)
@@ -388,6 +405,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         "BOND_KEY" -> "完成协议绑定"
         "REBINDING" -> "正在重新进行协议绑定"
         "READY" -> if(s.detail.contains("部分可选回执未确认")) "连接初始化完成；部分可选回执未确认" else "连接初始化完成"
+        "FAILED" -> ConnectionRecovery.describe(s.detail)
         else -> s.detail
     }
     private fun deviceMetadata(address: String): NearbyWatch? = sessionDevice?.takeIf { it.address.equals(address, true) }
@@ -683,6 +701,49 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
     }
     override fun openUnpairSettings() { if(!closed) runtime.unpair.openSettings() }
     override fun retryUnpair() { if(!closed && !preparing && startingOperation == null && deletionPreparation == null && !replacementActive()) runtime.unpair.retry() }
+    override fun cancelUnpair() { if(!closed && !preparing && startingOperation == null && deletionPreparation == null && !replacementActive()) runtime.unpair.cancel() }
+    override fun rebindNow() {
+        if(closed) return
+        if(mutable.value.connected || mutable.value.connecting || runtime.connection.ready()) {
+            message("请先断开或取消连接，再重新协议绑定"); return
+        }
+        if(mutable.value.introductionPending || removalWorking() || preparing || startingOperation != null ||
+            deletionPreparation != null || replacementActive() || runtime.watchfaces.busy() || mutable.value.operation.active) {
+            message("请先结束当前操作"); return
+        }
+        if(Build.VERSION.SDK_INT >= 31 && app.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            message("请授予附近设备连接权限"); return
+        }
+        val address = SavedWatchStore.canonicalAddress(mutable.value.selectedDeviceAddress ?: runtime.connection.address())
+            ?: run { message("请先选择设备，再重新协议绑定"); return }
+        if(removalBlocks(address)) { message("此设备的解除配对尚待确认或清理，未重新绑定"); return }
+        val generation = runCatching { runtime.secure.removals().generation(address) }.getOrElse {
+            message("无法核实设备资料状态：${Core.code(it)}"); return
+        }
+        if(generation > 0L && knownUnpairDevice(address) == null) { message("此设备记录已清除，请重新搜索后连接设备"); return }
+        val transport = mutable.value.savedDevices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.transport
+            ?: mutable.value.devices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.transport
+        val bleOnly = transport == "低功耗蓝牙"
+        prompt("rebind_now", "重新协议绑定？",
+            "会清除本应用为该手表保存的协议密钥，并立即重新进行协议配对。手表切换省电/全能模式后通常需要这一步。\n重新绑定可能改变手表与其他应用的连接关系，是否继续？",
+            true, "重新绑定", {
+                if(closed || removalWorking() || removalBlocks(address) || !runtime.secure.removals().usable(address, generation))
+                    throw Core.Fault("REBIND_TARGET_CHANGED")
+                stopScan(); invalidatePrompt()
+                try {
+                    ContextCompat.startForegroundService(app, Intent(app, ConnectionService::class.java))
+                    sessionDevice = NearbyWatch(address, mutable.value.watchName.ifBlank { "未知名称设备" }, false)
+                    mutable.update { it.copy(selectedDeviceAddress = address, connectionFormRevision = it.connectionFormRevision + 1L,
+                        connecting = true, statusMessage = "") }
+                    runtime.logs.record("REBIND_UI_CONFIRM", "target_known=true transport=${if(bleOnly) "gatt" else "rfcomm_secure"} no_auto_retry=true")
+                    runtime.connection.rebind(address, bleOnly)
+                } catch(e: Exception) {
+                    val code = if(e is SecurityException) "BLUETOOTH_PERMISSION_REQUIRED" else Core.code(e)
+                    mutable.update { it.copy(connecting = runtime.snapshot().connecting) }
+                    message("重新绑定未开始：$code")
+                }
+            }, {})
+    }
     fun verifyUnpairAfterSettings() { if(!closed) runtime.unpair.verify() }
     override fun submitPin(expectedEpoch: Long, pin: String) {
         if(closed || removalBlocks(runtime.connection.address()) || expectedEpoch != runtime.connection.epoch() || mutable.value.connectionEpoch != expectedEpoch || !mutable.value.needsPin) return
@@ -732,6 +793,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             "CONNECT_AND_AUTHENTICATE_FIRST" -> "请先连接手表后重试"
             "LIST_QUERY_TIMEOUT_RECONNECT" -> "读取表盘列表超时，请重新连接后刷新"
             "DEVICE_LIST_ERROR" -> "手表未返回有效列表，请重新刷新"
+            "WIRE_FACE_LIST_INCOMPLETE" -> "手表列表有条目缺少版本等必需字段；该条目不会作为操作目标，其他表盘照常可用"
             "RECONNECT_AFTER_UNCERTAIN_FILE_RESULT" -> "上次操作尚未可靠收尾，请重新连接后刷新"
             "DELETE_PREPARATION_CHANGED" -> "所选表盘已变化，请刷新列表后重新选择"
             else -> "操作未完成：$code"
@@ -839,17 +901,43 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
                 val filename = runCatching { app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if(it.moveToFirst()) it.getString(0) else null } }.getOrNull() ?: "本地 HWT"
                 app.contentResolver.openInputStream(uri).use { input -> if(input == null) throw Core.Fault("HWT_INPUT_UNAVAILABLE"); loaded = HwtSource.load(input, app.filesDir) }
                 val imported = loaded!!
-                val payload = imported.freeze(HwtSource.Mode.BIN); payload.verify()
+                val kinds = PayloadKinds.available(imported)
+                val payloads = LinkedHashMap<HwtSource.Mode, HwtSource.Snapshot>()
+                val failures = mutableListOf<String>()
+                for(kind in kinds) {
+                    val mode = PayloadKinds.mode(kind) ?: continue
+                    try { payloads[mode] = imported.freeze(mode).also { it.verify() } }
+                    catch(e: Exception) { failures += "$kind:${Core.code(e)}" }
+                }
+                val preparedKinds = kinds.filter { PayloadKinds.mode(it)?.let(payloads::containsKey) == true }
+                val chosen = PayloadKinds.preferred(kinds)?.takeIf { it in preparedKinds }
+                val payload = chosen?.let { PayloadKinds.mode(it)?.let(payloads::get) }
                 main.post {
                     preparing = false
                     if(closed) { cleanAsync(imported); return@post }
                     val old = source
-                    source = imported; sourcePayload = payload
+                    source = imported; sourcePayloads = payloads.toMap(); chosenPayloadKind = chosen
                     old?.let(::cleanAsync)
-                    runtime.logs.record("SOURCE_IMPORTED", "bytes=${payload.size} sha256=${payload.hash} source_sha256=${imported.sourceHash} xml_not_rewritten=true no_command_sent=true")
-                    mutable.update { it.copy(source = SourceInfo(imported.title, filename, imported.original.length(), payload.size, imported.xmlVersion, payload.hash, imported.preview?.absolutePath, imported.previewHash), operation = OperationInfo()) }
+                    runtime.logs.record("SOURCE_IMPORTED", "bytes=${payload?.size ?: 0} sha256=${payload?.hash ?: "unavailable"} source_sha256=${imported.sourceHash} payload_available=${payload != null} detected_kinds=${kinds.joinToString(",")} prepared_kinds=${preparedKinds.joinToString(",")} selected=${chosen ?: "none"} container_members=${imported.allModeMembers} container_diagnostic=${imported.containerDiagnostic} payload_failures=${failures.joinToString(",").ifEmpty { "none" }} source_content_not_rewritten=true payload_profile=watch-allmode-v1 no_command_sent=true")
+                    val view = SourceInfo(
+                        title=imported.title, fileName=filename, sourceBytes=imported.original.length(),
+                        payloadBytes=payload?.size ?: 0, xmlVersion=imported.xmlVersion, sha256=payload?.hash ?: imported.sourceHash,
+                        previewPath=imported.preview?.absolutePath, previewSha256=imported.previewHash,
+                        replacementAvailable=HwtSource.Mode.BIN in payloads, payloadKind=chosen ?: PayloadKinds.NONE,
+                        payloadKinds=preparedKinds, detectedPayloadKinds=kinds, screen=imported.screen,
+                        payloadDiagnostic=failures.joinToString(",").ifEmpty {
+                            if(!imported.allModeResource && imported.containerDiagnostic !in setOf("RAW_BIN_RESOURCE","CONTAINER_CONFIG_MISSING")) imported.containerDiagnostic
+                            else if(kinds.isEmpty()) imported.containerDiagnostic else ""
+                        },
+                        importToken=tokens.incrementAndGet(),
+                    )
+                    mutable.update { it.copy(source=view, operation=OperationInfo()) }
                     apply(runtime.snapshot())
-                    message("HWT 已就绪，请展开目标表盘并点击替换")
+                    message(when {
+                        payload != null -> "HWT 已就绪：${PayloadKinds.displayFormat(view.detectedPayloadKinds)}"
+                        preparedKinds.isNotEmpty() -> "默认载荷未就绪，请在文件详情手动选择已准备的直装类型"
+                        else -> "该 HWT 未找到可传输的表盘内容，请查看文件结构诊断"
+                    })
                 }
             } catch(e: Exception) {
                 loaded?.let(::cleanAsync)
@@ -865,12 +953,79 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             if(!closed) { mutable.update { it.copy(operation = OperationInfo()) }; apply(runtime.snapshot()); message("文件读取未开始，请重新选择 HWT") }
         }
     }
+    private fun selectedPayload(): HwtSource.Snapshot? =
+        chosenPayloadKind?.let(PayloadKinds::mode)?.let(sourcePayloads::get)
+
+    /** 只切换本次导入可用的载荷类型；不改变连接、列表或已冻结的字节。 */
+    override fun selectPayloadKind(kind: String) {
+        val ui=mutable.value
+        if(closed || preparing || filePickToken!=null || startingOperation!=null || deletionPreparation!=null ||
+            pending!=null || removalWorking() || removalBlocks(runtime.connection.address()) || runtime.watchfaces.busy() ||
+            replacementActive() || !PayloadSelectionPolicy.canSelect(ui)) return
+        if(kind !in ui.source!!.payloadKinds) return
+        val mode = PayloadKinds.mode(kind) ?: return
+        val payload = sourcePayloads[mode] ?: return
+        if(payload.source !== source || !payload.source.matchesPayload(payload)) return
+        if(chosenPayloadKind == kind) return
+        chosenPayloadKind = kind
+        runtime.logs.record("PAYLOAD_KIND_SELECTED", "kind=$kind bytes=${payload.size} sha256=${payload.hash} no_command_sent=true")
+        mutable.update { state -> state.source?.let { state.copy(source = it.copy(
+            payloadKind = kind, payloadBytes = payload.size, sha256 = payload.hash)) } ?: state }
+    }
+    override fun requestDirectInstall() {
+        val ui = mutable.value
+        if(closed || removalWorking() || removalBlocks(runtime.connection.address()) || preparing || filePickToken != null ||
+            startingOperation != null || deletionPreparation != null || replacementActive() || runtime.watchfaces.busy() ||
+            pending != null || ui.prompt != null || ui.needsPin || !UiPolicy.canOperateFaces(ui)) return
+        val imported = source ?: run { message("请先选择 HWT 文件"); return }
+        val payload = selectedPayload() ?: run { message("该 HWT 未找到可传输的表盘内容"); return }
+        val payloadKind = PayloadKinds.kind(payload.mode)
+        val snapshot = runtime.snapshot()
+        val epoch = snapshot.epoch
+        val address = SavedWatchStore.canonicalAddress(snapshot.deviceAddress) ?: return
+        val revision = snapshot.operationRevision
+        val formRevision = ui.connectionFormRevision
+        fun validate() {
+            val now = runtime.snapshot(); val current = mutable.value
+            if(closed || current.introductionPending || removalWorking() || removalBlocks(address) || preparing || filePickToken != null ||
+                startingOperation != null || deletionPreparation != null || runtime.watchfaces.busy() || now.active || now.needsPin ||
+                !now.ready || !runtime.connection.ready() || now.epoch != epoch || runtime.connection.epoch() != epoch ||
+                !now.deviceAddress.equals(address, true) || !runtime.connection.address().equals(address, true) ||
+                current.selectedDeviceAddress?.equals(address, true) != true || current.connectionFormRevision != formRevision ||
+                now.operationRevision != revision) throw Core.Fault("SELECTED_CONNECTION_CHANGED")
+            if(runtime.watchfaces.reconnectRequired(epoch)) throw Core.Fault("RECONNECT_AFTER_UNCERTAIN_FILE_RESULT")
+            if(!now.listReady || !runtime.watchfaces.replacementListFresh(epoch)) throw Core.Fault("FRESH_DEVICE_LIST_REQUIRED")
+            if(source !== imported || chosenPayloadKind != payloadKind || current.source?.payloadKind != payloadKind ||
+                selectedPayload() !== payload || !imported.matchesPayload(payload) ||
+                !payload.file.isFile || payload.file.length() != payload.size.toLong()) throw Core.Fault("SOURCE_SELECTION_CHANGED")
+        }
+        try {
+            validate()
+            val random = java.security.SecureRandom()
+            val id = DirectInstallTargetPolicy.allocate(snapshot.faces.map { it.id }) { random.nextInt(DirectInstallTargetPolicy.MAX_SAFE_ID) + 1 }
+                ?: throw Core.Fault("DIRECT_INSTALL_ID_UNAVAILABLE")
+            val filename = ui.source?.fileName ?: imported.title
+            prompt("direct_install", "直接安装表盘？", "$filename\n格式：${PayloadKinds.displayFormat(ui.source?.detectedPayloadKinds ?: listOf(payloadKind))}\n将传输：${PayloadKinds.detail(payloadKind)}\n传输大小：${payload.size} B\n\n请先确认目标手表是 WATCH 系列全能模式，或其他系列/模式且固件版本在 6.0.0.32 之前。", false, "安装", {
+                validate()
+                if(runtime.snapshot().faces.any { DirectInstallTargetPolicy.sameNumericId(it.id, id) }) throw Core.Fault("DIRECT_INSTALL_ID_CONFLICT")
+                val request = runtime.watchfaces.newDirectInstallRequest(id, DirectInstallTargetPolicy.VERSION, epoch)
+                if(!runtime.openReplacementDialog(request, imported.title, filename)) throw Core.Fault("WATCHFACE_OPERATION_BUSY")
+                fileOnlyPreview = true
+                apply(runtime.snapshot())
+                try {
+                    validate()
+                    runtime.logs.record("DIRECT_INSTALL_UI_CONFIRM", "id=$id version=${DirectInstallTargetPolicy.VERSION} captured_epoch=$epoch payload=$payloadKind repacked=${payload.mode==HwtSource.Mode.CONTAINER_NO_BIN} outer_hwt_sent=false")
+                    runtime.watchfaces.beginDirectInstall(payload, epoch, request)
+                } catch(e: Exception) { replacementUiRejected(Core.code(e), request.identity) }
+            })
+        } catch(e: Exception) { replacementUiRejected(Core.code(e)) }
+    }
     /** 旧无目标入口绝不选择当前/第一行；只有显式逐卡重载可以发起设备操作。 */
     override fun requestReplacement() {}
     override fun requestReplacement(face: FaceItem, epoch: Long) {
         if(closed || removalWorking() || removalBlocks(runtime.connection.address()) || preparing || filePickToken != null || startingOperation != null || deletionPreparation != null || replacementActive() || runtime.watchfaces.busy() || pending != null || mutable.value.prompt != null || mutable.value.needsPin) return
         val imported = source ?: run { message("请先选择 HWT 文件"); return }
-        val payload = sourcePayload ?: run { replacementUiRejected("PAYLOAD_SNAPSHOT_UNAVAILABLE"); return }
+        val payload = sourcePayloads[HwtSource.Mode.BIN] ?: run { message("XML 格式仅能用于 WATCH 系列全能模式直装，不支持替换；WATCH 系列全能模式只支持直装"); return }
         try {
             val row = captureRow(face, epoch)
             val (observed, snapshot) = currentRow(row)
@@ -881,7 +1036,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
             val title = row.rendered.title
             val filename = mutable.value.source?.fileName ?: imported.title
             val currentWarning = if(FacePolicy.current(current)) "\n该表盘正在使用，替换时手表可能切换显示。" else ""
-            prompt("replacement", "替换该表盘？", "$title\nID：${current.id}\n文件：$filename\n${current.version} → ${target.version}\n传输内容：${payload.size} B$currentWarning\n\n将覆盖该 ID 的现有内容。", true, "替换", {
+            prompt("replacement", "替换该表盘？", "$title\nID：${current.id}\n文件：$filename\n${current.version} → ${target.version}\n替换固定使用：经典/BIN 载荷 ${payload.size} B$currentWarning\n\n将覆盖该 ID 的现有内容，不使用当前全能模式直装选择。", true, "替换", {
                 // 确认先创建会话，再廉价重验；原卡/源副本与上下文已闭包捕获，不能改选其他行。
                 startReplacement(target, imported, payload, title, filename)
             })
@@ -895,7 +1050,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         runtime.logs.record("REPLACE_UI_CONFIRM", "id=${target.face.id} version=${target.version} captured_epoch=${target.epoch} current_epoch=${runtime.connection.epoch()} token_consumed=true")
         try {
             val actual = currentPickFace(target)
-            if(source !== imported || sourcePayload !== payload) throw Core.Fault("SOURCE_SELECTION_CHANGED")
+            if(source !== imported || sourcePayloads[HwtSource.Mode.BIN] !== payload) throw Core.Fault("SOURCE_SELECTION_CHANGED")
             if(runtime.watchfaces.busy()) throw Core.Fault("WATCHFACE_OPERATION_BUSY")
             runtime.watchfaces.beginReplacement(actual, target.version, payload, target.epoch, request)
         } catch(e: Exception) { replacementUiRejected(Core.code(e), request.identity) }
@@ -1101,7 +1256,7 @@ class WatchViewModel(application: Application) : AndroidViewModel(application), 
         if(closed) return
         if(runtime.watchfaces.busy() || replacementActive() || preparing || startingOperation != null || deletionPreparation != null || filePickToken != null) { message("请先结束当前表盘操作"); return }
         invalidatePrompt()
-        val old = source; source = null; sourcePayload = null
+        val old = source; source = null; sourcePayloads = emptyMap(); chosenPayloadKind = null
         old?.let(::cleanAsync)
         mutable.update { it.copy(source = null) }
         message("导入缓存已清除")

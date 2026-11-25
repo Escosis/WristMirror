@@ -64,6 +64,7 @@ import io.github.escosis.hwtfaceswap.AppActions
 import io.github.escosis.hwtfaceswap.AppUiState
 import io.github.escosis.hwtfaceswap.FaceItem
 import io.github.escosis.hwtfaceswap.SourceInfo
+import io.github.escosis.hwtfaceswap.protocol.PayloadKinds
 import io.github.escosis.hwtfaceswap.UiPolicy
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -188,26 +189,25 @@ internal fun FacesScreen(
                             .padding(start = 16.dp, end = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(if (sourceSnapshot == null) "HWT 文件：未选择" else "HWT 文件：", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             sourceSnapshot?.let { file ->
                                 Text(file.fileName.uiText(), fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                Spacer(Modifier.height(6.dp))
-                                MutedText(formatBytes(file.payloadBytes.toLong()))
                             }
                         }
                         if (sourceSnapshot != null) ExpandButton(showSource, "文件信息", onClick = toggleSource)
                     }
                     AnimatedVisibility(
                         visibleState = sourceTransition,
+                        modifier = Modifier.fillMaxWidth(),
                         enter = fadeIn(tween(160, easing = FastOutSlowInEasing)) +
                             expandVertically(tween(160, easing = FastOutSlowInEasing), expandFrom = Alignment.Top),
                         exit = fadeOut(tween(160, easing = FastOutSlowInEasing)) +
                             shrinkVertically(tween(160, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
                     ) {
-                        Column {
+                        Column(Modifier.fillMaxWidth()) {
                             Spacer(Modifier.height(12.dp))
-                            sourceSnapshot?.let { SourceDetails(it, Modifier.padding(horizontal = 16.dp)) }
+                            sourceSnapshot?.let { SourceDetails(it, state, actions, host, { sourceOwner.get() && showSource }, Modifier.fillMaxWidth().padding(horizontal = 16.dp)) }
                         }
                     }
                 }
@@ -362,8 +362,8 @@ private fun FaceRow(
                     ExpandButton(expanded, "表盘信息", onClick = toggle)
                 }
                 if (expanded) {
-                    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             ValueRow("版本", face.version.ifBlank { "手表未提供" })
                             ValueRow("ID", face.id)
                             ValueRow("类型", face.kind)
@@ -397,12 +397,24 @@ private fun ExpandButton(expanded: Boolean, label: String, onClick: () -> Unit) 
 }
 
 @Composable
-private fun SourceDetails(source: SourceInfo, modifier: Modifier = Modifier) {
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        ValueRow("表盘名称", source.title)
-        ValueRow("源文件大小", formatBytes(source.sourceBytes))
-        ValueRow("待传输内容", formatBytes(source.payloadBytes.toLong()))
-        ValueRow("文件版本", source.xmlVersion.ifBlank { "未提供" })
-        HwtPreview(source)
+private fun SourceDetails(
+    source: SourceInfo, state: AppUiState, actions: AppActions, host: FaceActionHost,
+    ownerCurrent: () -> Boolean, modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            HwtPreview(source)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ValueRow("名称", source.title, compact = true)
+                // 格式按文件自身结构显示，不按默认直装载荷改写。
+                ValueRow("格式", PayloadKinds.displayFormat(source.detectedPayloadKinds), compact = true)
+                ValueRow("大小", formatBytes(source.sourceBytes), compact = true)
+                ValueRow("版本", source.xmlVersion.ifBlank { "未提供" }, compact = true)
+                ValueRow("屏幕", source.screen, compact = true)
+            }
+        }
+        if (source.payloadDiagnostic.isNotBlank()) ValueRow("诊断", source.payloadDiagnostic, compact = true)
+        MutedText(PayloadKinds.formatNote(source.detectedPayloadKinds), Modifier.fillMaxWidth())
     }
 }

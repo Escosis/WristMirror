@@ -18,6 +18,36 @@ public final class Wire {
 
     private Wire() {}
 
+    /** Exact business dispatch policy used before the existing session-envelope verification. */
+    public static boolean businessPacket(int service, int command) {
+        return service == 0x27 && (command == 1 || command == 2 || command == 3 || command == 5 || command == 6) ||
+                service == 0x28 && (command == 2 || command == 3 || command == 4 || command == 5 || command == 6 || command == 7 || command == 8);
+    }
+
+    /** Bounded P2P control metadata only; payload tag7 is represented solely by its length. */
+    public static String p2pMetadata(byte[] body) throws IOException {
+        List<TlvView.Part> fields = TlvView.decode(body);
+        TlvView.Part payload = unique(fields, 7);
+        return "inner_command=" + numberObservation(fields, 1) + " sequence=" + numberObservation(fields, 2) +
+                " source_package=" + packageObservation(unique(fields, 3)) +
+                " target_package=" + packageObservation(unique(fields, 4)) +
+                " data_bytes=" + (payload == null ? "absent" : Integer.toString(payload.value.length)) +
+                " response_code=" + numberObservation(fields, 8) + " payload_not_logged=true handler=unregistered_no_ack";
+    }
+
+    private static String numberObservation(List<TlvView.Part> fields, int tag) {
+        try { return String.valueOf(number(fields, tag)); } catch (IOException ignored) { return "invalid"; }
+    }
+
+    private static String packageObservation(TlvView.Part part) {
+        if (part == null) return "absent";
+        if (part.value.length == 0) return "empty";
+        if (part.value.length > 80) return "overlong";
+        for (byte b : part.value) if ((b & 255) > 127) return "non_ascii";
+        String value = new String(part.value, StandardCharsets.US_ASCII);
+        return value.matches("[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+") ? value : "invalid";
+    }
+
     /** 仅生成 TLV 数据体；原生命令与传输层另行提供 0x27/0x03 及原有帧封装。 */
     public static byte[] operation(String id, String ver) throws IOException {
         Core.resource(id, ver);
@@ -122,25 +152,78 @@ public final class Wire {
      * 所选替换目标另由 VersionPolicy/Core.resource 校验。
      */
     public static List<TlvView.Face> faces(List<TlvView.Part> fields) throws IOException {
+        return readFaces(fields, false).faces;
+    }
+
+    /** Partial rows are display-only observations, never a complete device inventory. */
+    public static final class FaceListObservation {
+        public final List<TlvView.Face> faces;
+        public final List<IncompleteFace> incompleteEntries;
+        private FaceListObservation(List<TlvView.Face> faces, List<IncompleteFace> incomplete) {
+            this.faces = Collections.unmodifiableList(new ArrayList<TlvView.Face>(faces));
+            this.incompleteEntries = Collections.unmodifiableList(new ArrayList<IncompleteFace>(incomplete));
+        }
+        public boolean complete() { return incompleteEntries.isEmpty(); }
+    }
+
+    /** Incomplete entries remain non-targets; only bounded decimal resource IDs are retained for diagnostics. */
+    public static final class IncompleteFace {
+        public final int index;
+        public final boolean missingId, missingVersion, missingType;
+        public final String tags, observedId;
+        public final Long observedType;
+        private IncompleteFace(int index, String id, String version, Long type, String tags) {
+            this.index = index; missingId = id == null; missingVersion = version == null; missingType = type == null; this.tags = tags;
+            observedId = id != null && id.matches("[0-9]{1,11}") ? id : null;
+            observedType = type;
+        }
+        public String summary() {
+            return "entry_index=" + index + " missing_id=" + missingId + " missing_version=" + missingVersion +
+                    " missing_type=" + missingType + " observed_id=" + observedId + " observed_type=" + observedType +
+                    " id_only_not_resource_key=true tags=" + tags;
+        }
+    }
+
+    /** Absent/empty required row fields can be isolated for display; no default identity or type is invented. */
+    public static FaceListObservation observeFaces(List<TlvView.Part> fields) throws IOException {
+        return readFaces(fields, true);
+    }
+
+    private static String observedText(List<TlvView.Part> data, int tag) throws IOException {
+        TlvView.Part field = unique(data, tag);
+        return field == null || field.value.length == 0 ? null : text(data, tag);
+    }
+
+    private static Long observedNumber(List<TlvView.Part> data, int tag) throws IOException {
+        TlvView.Part field = unique(data, tag);
+        return field == null || field.value.length == 0 ? null : number(data, tag);
+    }
+
+    private static FaceListObservation readFaces(List<TlvView.Part> fields, boolean allowIncomplete) throws IOException {
         TlvView.Part root = unique(fields, 0x81);
         if (root == null) throw new Core.Fault("WIRE_FACE_LIST_ROOT_MISSING");
         Budget budget = new Budget();
         budget.initial(fields);
         List<TlvView.Part> entries = budget.decode(root.value);
         List<TlvView.Face> out = new ArrayList<TlvView.Face>();
+        List<IncompleteFace> incomplete = new ArrayList<IncompleteFace>();
+        int index = 0;
         for (TlvView.Part entry : entries) {
             if (entry.tag != 0x82) continue;
             List<TlvView.Part> data = budget.decode(entry.value);
-            String id = text(data, 3);
-            String ver = text(data, 4);
-            Long type = number(data, 5);
+            String id = allowIncomplete ? observedText(data, 3) : text(data, 3);
+            String ver = allowIncomplete ? observedText(data, 4) : text(data, 4);
+            Long type = allowIncomplete ? observedNumber(data, 5) : number(data, 5);
             Long expand = number(data, 7);
             if (id == null || ver == null || type == null) {
-                throw new Core.Fault("WIRE_FACE_REQUIRED_FIELD_MISSING");
+                if (!allowIncomplete) throw new Core.Fault("WIRE_FACE_REQUIRED_FIELD_MISSING");
+                incomplete.add(new IncompleteFace(index, id, ver, type, TlvView.tags(data)));
+            } else {
+                out.add(new TlvView.Face(id, ver, type, expand));
             }
-            out.add(new TlvView.Face(id, ver, type, expand));
+            index++;
         }
-        return Collections.unmodifiableList(out);
+        return new FaceListObservation(out, incomplete);
     }
 
     private static void validateParts(List<TlvView.Part> fields) throws IOException {

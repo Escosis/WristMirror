@@ -90,7 +90,7 @@ internal fun AboutScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
 
             Text(
-                text = "利用替换法为华为手表安装第三方 HWT 表盘的工具，面向绝大多数采用兼容表盘协议的 GT、FIT 等设备，也为直接传输失灵的新鸿蒙版本提供既有资源替换路径。支持连接、读取表盘、替换与删除；具体兼容性以设备型号和固件实现为准。华为 ID 与认证资料按设备加密保存在本机，更新检查通过 GitHub 完成。",
+                text = "一个华为手表表盘管理和第三方 HWT 表盘安装工具，面向绝大多数采用兼容表盘协议的 WATCH、GT、FIT 等系列设备，第三方表盘安装通过替换法支持直装法失灵的新鸿蒙版本。支持连接、读取、启用和删除手表中表盘，本地 HWT 解析、直装或替换表盘；具体兼容性以设备型号和固件实现为准。华为 ID 与认证资料按设备加密保存在本机，更新检查通过 GitHub 完成。",
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 color = MiuixTheme.colorScheme.onSurface,

@@ -26,14 +26,17 @@ public final class ReplacementState {
         if(terminal())return Action.NONE;
         if(phase==Phase.WAIT_OPERATION) {
             initialError=error;initialNeed=need;
-            if(error==null || need==null){fail("OPERATION_FIELDS_MISSING",null);return Action.NONE;}
+            // 0105 日志：本机 27/03 回包 30 B 只带 1/2/3 与 need=1，缺 7F；Health handleApply 与腕连 w0.H 都把缺失的 7F 初始化成 0。
+            // 原始观测仍保留 null（initial_error=null、initial_error_defaulted=true），缺 04 need 仍然拒绝。
+            if(need==null){fail("OPERATION_FIELDS_MISSING",null);return Action.NONE;}
             if(need.longValue()==0){phase=Phase.NO_TRANSFER;reason="INCREMENTED_VERSION_NEED_ZERO_NO_MORE_RETRY";return Action.NONE;}
             if(need.longValue()!=1){fail("OPERATION_NEED_INVALID",null);return Action.NONE;}
             uploadIssued=true;phase=Phase.TRANSFERRING;reason="DEVICE_REQUESTED_FILE";return Action.UPLOAD;
         }
         if(postIssued) {
             postError=error;postNeed=need;
-            if(error==null || need==null){fail("POST_OPERATION_FIELDS_MISSING",null);return Action.NONE;}
+            // 同一条原厂默认：缺 7F 视为 0，但缺 04 need 仍拒绝（不推断文件已被接受）。
+            if(need==null){fail("POST_OPERATION_FIELDS_MISSING",null);return Action.NONE;}
             if(need.longValue()!=0){fail("POST_OPERATION_REQUESTED_MORE_FILE_NO_RETRY",null);return Action.NONE;}
             if(!postObserved){postObserved=true;postGeneration++;}
             phase=Phase.WAIT_LIST;reason="POST_OPERATION_CONFIRMED_WAIT_FRESH_LIST";return Action.QUERY;
@@ -76,7 +79,9 @@ public final class ReplacementState {
         }
     }
     public String summary(){return "phase="+phase+" reason="+reason+" initial_error="+initialError+" initial_need="+initialNeed
+        +" initial_error_defaulted="+(initialNeed!=null&&initialError==null)
         +" upload_issued="+uploadIssued+" native_result="+nativeRespond+" native_percent="+progress+" report="+report
         +" report_two="+reportReceived+" post_issued="+postIssued+" post_error="+postError+" post_need="+postNeed
+        +" post_error_defaulted="+(postObserved&&postError==null)
         +" listed="+listed+" current="+current+" generation="+postGeneration+" list_observations="+listObservations+" first_error="+firstError;}
 }

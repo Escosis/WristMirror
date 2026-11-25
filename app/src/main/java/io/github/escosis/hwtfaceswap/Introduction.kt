@@ -2,7 +2,7 @@ package io.github.escosis.hwtfaceswap
 
 import java.util.WeakHashMap
 
-/** 本地说明标记，不含版本、MAC、账户或任何厂商协议接受状态。 */
+/** 本地说明标记；按软件安装版本确认，不含 MAC、账户或厂商协议接受状态。 */
 internal class IntroductionReadMarker(
     private val preferenceOwner: Any,
     private val readAcknowledged: () -> Boolean,
@@ -23,6 +23,9 @@ internal class IntroductionReadMarker(
 
     companion object {
         const val KEY = "introduction_acknowledged"
+        const val INSTALLATION_KEY = "introduction_acknowledged_installation"
+        fun isCurrentInstallation(acknowledged: String?, current: String): Boolean =
+            acknowledged != null && acknowledged == current
         private val uncommittedOwners = WeakHashMap<Any, Unit>()
     }
 }
@@ -90,22 +93,24 @@ internal data class IntroductionListItem(val parts: List<IntroductionTextPart>) 
 }
 internal data class IntroductionSection(val title: String, val items: List<IntroductionListItem>)
 
-/** 用户提供的 release 说明，原文保留；其中理论兼容性文字不是本应用的实机验证保证。 */
+/** 内置使用说明；仅使用三级标题和列表，不依赖完整 Markdown 渲染。 */
 internal object IntroductionContent {
+    // 保留供现有说明弹窗中的复制 helper 编译使用；当前说明不生成链接片段。
     const val VMALL_URL = "https://www.vmall.com"
     val markdown = """
         ### 项目说明
-        - 利用替换法为华为手表安装本地第三方 HWT 表盘，支持采用兼容表盘协议的 GT、FIT 等设备，并为直接传输失灵的新鸿蒙固件提供既有资源替换路径。
+        - 一个华为手表表盘管理和第三方 HWT 表盘安装工具，面向绝大多数采用兼容表盘协议的 WATCH、GT、FIT 等系列设备，第三方表盘安装通过替换法支持直装法失灵的新鸿蒙版本。
         ### 使用建议
-        - 该应用无法与运动健康同时连接手表，请先清除其后台再运行此应用。注意，不清除其后台可能导致替换失败！
-        - 应用中已集成一键获取华为 ID 功能，建议直接使用。注意，填写不正确会导致手表询问是否将数据清空，请勿点击确定！
-        - 替换法等效于删除原表盘，请先前往华为运动健康下载免费表盘，或选择无用表盘进行替换操作。被替换的表盘可重新从商店中下回。
-        - 该应用可能不支持 WATCH 系列设备的全能模式或鸿蒙手机，此类用户如使用时遇到问题可直接使用 GadgetBridge 或腕连手表助手安装第三方表盘。
+        - 使用前请先退出运动健康并清理其后台，避免同时占用连接通道导致操作失败。
+        - 建议使用内置功能获取华为 ID。填写错误可能导致手表询问是否清空数据，遇到此提示请勿确认，应取消并核对配置。
+        - 替换会覆盖原表盘，请先从运动健康下载免费表盘（建议从“官方免费表盘”中下载而非“表盘市场”中），或选择不再使用的表盘作为目标。原表盘仍在商店提供时，可重新下载恢复。
+        - WATCH 系列全能模式使用 XML 或兼容格式直装，不支持替换；WATCH 省电模式以及 GT、FIT 等系列使用 BIN 资源，直装适用于固件 6.0.0.32 之前，较新固件可尝试替换。
+        - WATCH 系列切换模式后，若无法连接，可先断开连接，再使用“重新协议绑定”。
     """.trimIndent()
 
     val sections: List<IntroductionSection> = parse(markdown)
 
-    /** 仅解析内置的三级标题、列表和商城链接；不读取外部 Markdown、Cookie 或 ID。 */
+    /** 仅解析内置三级标题和列表，条目按普通文本显示，不生成可点击链接。 */
     internal fun parse(source: String): List<IntroductionSection> {
         val sections = mutableListOf<IntroductionSection>()
         var title: String? = null
@@ -114,8 +119,7 @@ internal object IntroductionContent {
             title?.let { sections += IntroductionSection(it, items.toList()) }
             items.clear()
         }
-        val link = Regex("\\[([^]]+)]\\(([^)]+)\\)")
-        source.replace("\\/", "/").lineSequence().forEach { raw ->
+        source.lineSequence().forEach { raw ->
             val line = raw.trim()
             when {
                 line.startsWith("### ") -> {
@@ -124,15 +128,7 @@ internal object IntroductionContent {
                 }
                 line.startsWith("- ") && title != null -> {
                     val text = line.removePrefix("- ")
-                    val parts = mutableListOf<IntroductionTextPart>()
-                    var offset = 0
-                    link.findAll(text).forEach { match ->
-                        if (match.range.first > offset) parts += IntroductionTextPart(text.substring(offset, match.range.first))
-                        parts += IntroductionTextPart(match.groupValues[1], match.groupValues[2].takeIf { it == VMALL_URL })
-                        offset = match.range.last + 1
-                    }
-                    if (offset < text.length) parts += IntroductionTextPart(text.substring(offset))
-                    items += IntroductionListItem(parts.toList())
+                    items += IntroductionListItem(listOf(IntroductionTextPart(text)))
                 }
             }
         }

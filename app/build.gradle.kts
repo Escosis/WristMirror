@@ -6,10 +6,16 @@ plugins {
 }
 
 // 内部版本号：主版本 × 10000 + 次版本 × 100 + 修订版本。
-val appVersionName = "1.1.0"
-val appVersionParts = appVersionName.split('.').map(String::toInt)
+val appVersionName = "1.2.0"
+val baseVersion = appVersionName.substringBefore("-")
+val isPreRelease = appVersionName != baseVersion
+val appVersionParts = baseVersion.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.all { it >= 0 } && appVersionParts.drop(1).all { it < 100 })
-val appVersionCode = appVersionParts[0] * 10000 + appVersionParts[1] * 100 + appVersionParts[2]
+
+var appVersionCode = appVersionParts[0] * 10000 + appVersionParts[1] * 100 + appVersionParts[2]
+if (isPreRelease) {
+    appVersionCode -= 1
+}
 
 android {
     namespace = "io.github.escosis.hwtfaceswap"

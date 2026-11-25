@@ -336,12 +336,15 @@ internal fun EmptyCard(title: String, message: String, icon: ImageVector = Watch
 }
 
 @Composable
-internal fun ValueRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        MutedText(label, Modifier.weight(0.4f))
+internal fun ValueRow(label: String, value: String, compact: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (compact) Arrangement.spacedBy(10.dp) else Arrangement.SpaceBetween,
+    ) {
+        MutedText(label, if (compact) Modifier else Modifier.weight(0.4f))
         Text(
             value.uiText(),
-            modifier = Modifier.weight(0.6f),
+            modifier = Modifier.weight(if (compact) 1f else 0.6f),
             fontSize = 13.sp,
             lineHeight = 20.sp,
             fontWeight = FontWeight.Medium,

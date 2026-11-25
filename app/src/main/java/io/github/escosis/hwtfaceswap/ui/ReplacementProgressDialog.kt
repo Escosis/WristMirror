@@ -38,7 +38,7 @@ import top.yukonga.miuix.kmp.layout.DialogDefaults
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal fun pageOperationCardVisible(operation: OperationInfo): Boolean =
-    operation.kind != "replacement" && operation.kind != "deletion" && operation.kind != "activation" &&
+    operation.kind != "direct_install" && operation.kind != "replacement" && operation.kind != "deletion" && operation.kind != "activation" &&
         (operation.active || operation.failed || operation.stage.isNotBlank())
 
 internal fun replacementDialogSameOwner(rendered: ReplacementDialogInfo, current: ReplacementDialogInfo?): Boolean =
@@ -51,21 +51,25 @@ internal fun replacementDialogCanDismiss(ownerAlive: Boolean, rendered: Replacem
 
 internal fun replacementDialogSucceeded(info: ReplacementDialogInfo): Boolean =
     !info.operation.active && !info.operation.failed && when (info.operation.kind) {
-        "replacement" -> info.operation.stage == "LISTED"
+        "replacement", "direct_install" -> info.operation.stage == "LISTED"
         "deletion" -> info.operation.stage == "DELETED"
         "activation" -> info.operation.stage == "ACTIVATED"
         else -> false
     }
 
 internal fun operationDialogTitle(info: ReplacementDialogInfo): String = when(info.operation.kind) {
+    "direct_install" -> "安装表盘"
     "deletion" -> "删除表盘"
     "activation" -> "启用表盘"
     else -> "替换表盘"
 }
 
 internal fun operationDialogStatusText(info: ReplacementDialogInfo): String = when {
-    replacementDialogSucceeded(info) -> when(info.operation.kind) { "deletion" -> "表盘已删除"; "activation" -> "表盘已启用"; else -> "表盘已替换" }
-    info.operation.stage == "CANCELLED" -> when(info.operation.kind) { "deletion" -> "删除已取消"; "activation" -> "启用已取消"; else -> "替换已取消" }
+    info.operation.kind == "direct_install" && info.operation.stage == "COMPLETED" && !info.operation.active && !info.operation.failed ->
+        if (info.operation.detail.startsWith("客户端直装流程已结束")) info.operation.detail
+        else io.github.escosis.hwtfaceswap.protocol.DirectInstallState.completionNotice(info.operation.detail)
+    replacementDialogSucceeded(info) -> when(info.operation.kind) { "direct_install" -> "表盘已安装"; "deletion" -> "表盘已删除"; "activation" -> "表盘已启用"; else -> "表盘已替换" }
+    info.operation.stage == "CANCELLED" -> when(info.operation.kind) { "direct_install" -> "安装已取消"; "deletion" -> "删除已取消"; "activation" -> "启用已取消"; else -> "替换已取消" }
     else -> info.operation.detail.ifBlank { info.operation.stage.ifBlank {
         when(info.operation.kind) { "deletion" -> "等待删除状态"; "activation" -> "等待启用状态"; else -> "等待替换状态" }
     } }
@@ -114,7 +118,7 @@ internal fun ReplacementProgressDialog(state: AppUiState, actions: AppActions) {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(operationDialogTitle(info), style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Medium)
                     if (info.title.isNotBlank()) Text(info.title.uiText(), style = MiuixTheme.textStyles.body1, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (info.operation.kind == "replacement" && info.fileName.isNotBlank()) Text(
+                    if ((info.operation.kind == "replacement" || info.operation.kind == "direct_install") && info.fileName.isNotBlank()) Text(
                         "HWT 文件：${info.fileName.uiText()}", style = MiuixTheme.textStyles.body2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         maxLines = 2, overflow = TextOverflow.Ellipsis,

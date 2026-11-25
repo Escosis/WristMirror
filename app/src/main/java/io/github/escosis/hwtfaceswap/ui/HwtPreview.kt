@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,8 +85,7 @@ private sealed interface PreviewState {
 @Composable
 internal fun HwtPreview(source: SourceInfo) {
     val colors = MiuixTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("预览", style = MiuixTheme.textStyles.body2, color = colors.onSurfaceVariantSummary)
+    Column(Modifier.size(128.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val path = source.previewPath
         val hash = source.previewSha256
         if (path == null || hash == null) {
@@ -100,7 +100,7 @@ internal fun HwtPreview(source: SourceInfo) {
                 }
             }
             Box(
-                modifier = Modifier.fillMaxWidth().height(240.dp).clip(RoundedCornerShape(16.dp))
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))
                     .background(colors.surfaceContainer),
                 contentAlignment = Alignment.Center,
             ) {

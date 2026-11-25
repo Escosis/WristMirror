@@ -34,15 +34,19 @@ public final class WatchfaceManager {
     public static final class ReplacementIdentity {
         public final long token,epoch;
         public final String id,version;
-        private ReplacementIdentity(String id,String version,long epoch){this.token=replacementTokens.incrementAndGet();this.id=id;this.version=version;this.epoch=epoch;}
+        public final boolean directInstall;
+        private ReplacementIdentity(String id,String version,long epoch){this(id,version,epoch,false);}
+        private ReplacementIdentity(String id,String version,long epoch,boolean directInstall){this.token=replacementTokens.incrementAndGet();this.id=id;this.version=version;this.epoch=epoch;this.directInstall=directInstall;}
     }
     /** 确认后、进入 actor 前的取消门；不能借此访问另一项原生操作。 */
     public static final class ReplacementRequest {
         public final ReplacementIdentity identity;
         private final AtomicBoolean submitted=new AtomicBoolean(),interruptRequested=new AtomicBoolean();
+        public final boolean directInstall;
         private final boolean legacy;
         private final Object previousOwner;
-        private ReplacementRequest(String id,String version,long epoch,boolean legacy,Object previousOwner){identity=new ReplacementIdentity(id,version,epoch);this.legacy=legacy;this.previousOwner=previousOwner;}
+        private ReplacementRequest(String id,String version,long epoch,boolean legacy,Object previousOwner){this(id,version,epoch,legacy,previousOwner,false);}
+        private ReplacementRequest(String id,String version,long epoch,boolean legacy,Object previousOwner,boolean directInstall){identity=new ReplacementIdentity(id,version,epoch,directInstall);this.legacy=legacy;this.previousOwner=previousOwner;this.directInstall=directInstall;}
     }
     /** 删除没有用户取消门；一次确认只允许提交同一对象一次。 */
     public static final class DeletionIdentity {
@@ -80,7 +84,8 @@ public final class WatchfaceManager {
     public ReplacementIdentity replacementIdentity(){ReplacementRequest r=shownReplacementRequest;return r==null?null:r.identity;}
     public ReplacementRequest currentReplacementRequest(){return shownReplacementRequest;}
     public ReplacementRequest newReplacementRequest(TlvView.Face face,String version,long epoch){return new ReplacementRequest(face==null?"":face.id,version,epoch,false,summaryOwner);}
-    public DeletionIdentity deletionIdentity(){DeletionRequest r=shownDeletionRequest;return r==null?null:r.identity;}
+    public ReplacementRequest newDirectInstallRequest(String id,String version,long epoch){if(id==null||version==null)throw new IllegalArgumentException("DIRECT_REQUEST_ID_VERSION_REQUIRED");return new ReplacementRequest(id,version,epoch,false,summaryOwner,true);}
+     public DeletionIdentity deletionIdentity(){DeletionRequest r=shownDeletionRequest;return r==null?null:r.identity;}
     public DeletionRequest currentDeletionRequest(){return shownDeletionRequest;}
     public DeletionRequest newDeletionRequest(TlvView.Face face,long epoch){return new DeletionRequest(face==null?"":face.id,face==null?"":face.version,epoch,summaryOwner);}
     public ActivationIdentity activationIdentity(){ActivationRequest r=shownActivationRequest;return r==null?null:r.identity;}
@@ -136,11 +141,18 @@ public final class WatchfaceManager {
         Op(String i,String v,long e){id=i;version=v;epoch=e;}
         boolean matches(String i,String v){return id.equals(i)&&version.equals(v);}
     }
-    private static final class Replace extends Op {
-        final ReplacementState state;final HwtSource.Snapshot source;final ReplacementRequest request;FileTransfer file;long postAt;boolean fileResultSeen;
+    private static class Replace extends Op {
+        final ReplacementState state;final DirectInstallState directState;final HwtSource.Snapshot source;final ReplacementRequest request;final ConfirmationWait confirmationWait=new ConfirmationWait();FileTransfer file;long postAt;boolean fileResultSeen;
         Replace(TlvView.Face face,String version,HwtSource.Snapshot source,long epoch,ReplacementRequest request)throws IOException{
-            super(face.id,version,epoch);state=new ReplacementState(face.id,face.version,version);this.source=source;this.request=request;
+            super(face.id,version,epoch);this.request=request;this.source=source;
+            state=request.directInstall?null:new ReplacementState(face.id,face.version,version);
+            directState=request.directInstall?new DirectInstallState(face.id,version):null;
         }
+        Replace(String id,String version,HwtSource.Snapshot source,long epoch,ReplacementRequest request)throws IOException{
+            super(id,version,epoch);this.request=request;this.source=source;
+            state=null;directState=new DirectInstallState(id,version);
+        }
+        boolean direct(){return directState!=null;}
     }
     private static final class Delete extends Op {
         final DeletionState state;final Set<String> otherIds;final DeletionRequest request;
@@ -159,7 +171,7 @@ public final class WatchfaceManager {
     }
     private static final class Query {
         final long serial,epoch;final Op op;final int generation;final PreDelete preparation;
-        Query(long serial,long epoch,Op op,PreDelete preparation){this.serial=serial;this.epoch=epoch;this.op=op;this.preparation=preparation;generation=op instanceof Replace?((Replace)op).state.postGeneration:op instanceof Delete?((Delete)op).state.signalGeneration:op instanceof Activate?((Activate)op).state.signalGeneration:0;}
+        Query(long serial,long epoch,Op op,PreDelete preparation){this.serial=serial;this.epoch=epoch;this.op=op;this.preparation=preparation;generation=op instanceof Replace?(((Replace)op).direct()?((Replace)op).directState.postGeneration:((Replace)op).state.postGeneration):op instanceof Delete?((Delete)op).state.signalGeneration:op instanceof Activate?((Activate)op).state.signalGeneration:0;}
     }
     private static final class PreDelete {
         final String id,version;final long epoch;final TlvView.Face requested;final DeletionPreparationListener callback;boolean completed;
@@ -169,7 +181,7 @@ public final class WatchfaceManager {
         if(p==null||p.completed)return;
         if(preDelete==p)preDelete=null;
         p.completed=true;
-        if(p.callback!=null)p.callback.onFailure(code);
+        if(p.callback!=null)p.callback.onFailure("DEVICE_FACE_LIST_INCOMPLETE_RECONNECT");
         if(publishError)error(code);
     }
     private void preparationReady(PreDelete p,TlvView.Face face){
@@ -192,7 +204,7 @@ public final class WatchfaceManager {
         publishFaces();
     });}
     private void retire(Op old,String reason){
-        if(old instanceof Replace){Replace r=(Replace)old;r.state.fail(reason,null);if(r.file!=null)try{r.file.close();}catch(Exception ignored){}}
+        if(old instanceof Replace){Replace r=(Replace)old;if(r.direct())r.directState.fail(reason,null);else r.state.fail(reason,null);if(r.file!=null)try{r.file.close();}catch(Exception ignored){}}
         else if(old instanceof Delete)((Delete)old).state.fail(reason,null);
         else((Activate)old).state.fail(reason,null);
         old.finished=SystemClock.elapsedRealtime();if(active==old){active=null;busy=false;}if(last==old)show(old);
@@ -214,7 +226,7 @@ public final class WatchfaceManager {
     }catch(IOException e){publishFaces();error(Core.code(e));}}
     private void publishFaces(){
         long own=connection.epoch(),age=SystemClock.elapsedRealtime()-listAt;
-        boolean fresh=listAt!=0&&listEpoch==own&&age>=0&&age<=REPLACEMENT_LIST_AGE&&query==null&&connection.ready();
+        boolean fresh=listAt!=0&&listEpoch==own&&age>=0&&age<=REPLACEMENT_LIST_AGE&&query==null&&connection.ready()&&!reconnectRequired(own);
         observation=new ListObservation(listAt,listEpoch,fresh);
         if(listener!=null){
             listener.onRefreshing(query!=null&&query.epoch==own,own);
@@ -280,6 +292,7 @@ public final class WatchfaceManager {
         Objects.requireNonNull(request);
         if(!request.submitted.compareAndSet(false,true))return;
         connection.post(()->{
+            if(request.directInstall){replacementRequestFinished(request,"PRECHECK_FAILED","DIRECT_REQUEST_ROUTE_MISMATCH");return;}
             if(request.interruptRequested.get()){replacementRequestFinished(request,"CANCELLED","USER_CANCELLED_BEFORE_SEND");return;}
             if(busy()){replacementRequestFinished(request,"PRECHECK_FAILED","WATCHFACE_OPERATION_BUSY");return;}
             if(reconnectRequired(connection.epoch())){replacementRequestFinished(request,"PRECHECK_FAILED","RECONNECT_AFTER_UNCERTAIN_FILE_RESULT");return;}
@@ -289,7 +302,7 @@ public final class WatchfaceManager {
                 validate(face,epoch,REPLACEMENT_LIST_AGE,false);
                 if(!Objects.equals(version,VersionPolicy.next(face.id,face.version,latest)))throw new Core.Fault("VERSION_CHANGED");
                 // 确认前已在文件线程校验并冻结，串行连接执行器不重复计算全文件摘要。
-                if(source==null||source.mode!=HwtSource.Mode.BIN||source.file==null||!source.file.isFile()||source.file.length()!=source.size)throw new Core.Fault("PAYLOAD_SNAPSHOT_UNAVAILABLE");
+                if(source==null||source.mode!=HwtSource.Mode.BIN||source.source==null||!source.source.matchesPayload(source)||source.file==null||!source.file.isFile()||source.file.length()!=source.size)throw new Core.Fault("PAYLOAD_SNAPSHOT_UNAVAILABLE");
                 if(request.interruptRequested.get()){replacementRequestFinished(request,"CANCELLED","USER_CANCELLED_BEFORE_SEND");return;}
                 Replace r=new Replace(face,version,source,epoch,request);start(r);
                 log.record("REPLACE_SEND_OPERATION","id="+r.id+" version="+r.version+" op=1 source_bytes="+source.size+" source_sha256="+source.hash+" pre_operation_budget=1 upload_budget=1");
@@ -301,6 +314,35 @@ public final class WatchfaceManager {
             }
         });
     }
+    /** Starts one parsed-content install with a new ID, without an existing-resource replacement preflight. */
+    public void beginDirectInstall(HwtSource.Snapshot source,long epoch,ReplacementRequest request){
+        Objects.requireNonNull(request);
+        if(!request.submitted.compareAndSet(false,true))return;
+        connection.post(()->{
+            if(!request.directInstall){replacementRequestFinished(request,"PRECHECK_FAILED","DIRECT_REQUEST_ROUTE_MISMATCH");return;}
+            if(request.interruptRequested.get()){replacementRequestFinished(request,"CANCELLED","USER_CANCELLED_BEFORE_SEND");return;}
+            if(busy()){replacementRequestFinished(request,"PRECHECK_FAILED","WATCHFACE_OPERATION_BUSY");return;}
+            if(reconnectRequired(connection.epoch())){replacementRequestFinished(request,"PRECHECK_FAILED","RECONNECT_AFTER_UNCERTAIN_FILE_RESULT");return;}
+            try{
+                ReplacementIdentity identity=request.identity;
+                if(identity.epoch!=epoch||epoch!=connection.epoch()||!connection.ready())throw new Core.Fault("SELECTED_CONNECTION_CHANGED");
+                long listAge=SystemClock.elapsedRealtime()-listAt;
+                if(listAt==0||listEpoch!=epoch||listAge<0||listAge>REPLACEMENT_LIST_AGE||query!=null)throw new Core.Fault("FRESH_DEVICE_LIST_REQUIRED");
+                if(!identity.id.matches("[0-9]{9}")||!"1.0.0".equals(identity.version))throw new Core.Fault("DIRECT_HWT_FILENAME_CONTRACT_INVALID");
+                if(source==null||source.file==null||!source.file.isFile()||source.file.length()!=source.size||
+                        source.source==null||!source.source.matchesPayload(source))throw new Core.Fault("DIRECT_PAYLOAD_SNAPSHOT_REQUIRED");
+                for(TlvView.Face f:latest)if(identity.id.replaceFirst("^0+(?!$)","").equals(f.id.replaceFirst("^0+(?!$)","")))throw new Core.Fault("DIRECT_HWT_ID_ALREADY_INSTALLED");
+                Replace op=new Replace(identity.id,identity.version,source,epoch,request);start(op);
+                op.file=new FileTransfer(op.id,op.version,source,FileTransfer.Route.DIRECT_INSTALL);
+                connection.sendFile(2,op.file.metadataBody(),true);
+                log.record("DIRECT_HWT_UPLOAD_STARTED","id="+op.id+" version="+op.version+" bytes="+source.size+" sha256="+source.hash+
+                        " source_bytes="+source.source.original.length()+" source_sha256="+source.source.sourceHash+
+                        " payload="+payloadKind(source)+" repacked="+(source.mode==HwtSource.Mode.CONTAINER_NO_BIN)+
+                        " container_members="+source.source.allModeMembers+" outer_hwt_sent=false file_type=1 upload_budget=1");
+                show(op);timer(op);
+            }catch(Exception e){String code=e instanceof SecurityException?"BLUETOOTH_PERMISSION_REQUIRED":Core.code(e);if(active instanceof Replace&&((Replace)active).request==request)failActive(code,null);else replacementRequestFinished(request,"PRECHECK_FAILED",code);}
+        });
+    }
     /** 即时置位仅属于此请求的取消门；真正原生停止必须在 actor 再验对象、代次与终态。 */
     public void cancelReplacement(ReplacementRequest request){
         if(request==null)return;request.interruptRequested.set(true);
@@ -308,8 +350,8 @@ public final class WatchfaceManager {
             Op op=active;
             if(!(op instanceof Replace))return;
             Replace r=(Replace)op;ReplacementIdentity identity=request.identity;
-            if(r.request!=request||r.request.identity!=identity||r.epoch!=identity.epoch||connection.epoch()!=identity.epoch||r.state.terminal())return;
-            r.state.cancel();finish(r);
+            if(r.request!=request||r.request.identity!=identity||r.epoch!=identity.epoch||connection.epoch()!=identity.epoch||terminal(r))return;
+            if(r.direct())r.directState.cancel();else r.state.cancel();finish(r);
         });
     }
     /** 旧调用者保留原监听路径；逐卡调用者必须使用携带请求行与私有回调的重载。 */
@@ -407,17 +449,24 @@ public final class WatchfaceManager {
         try{
             if(service==0x28){
                 if(!(op instanceof Replace)||command<2||command>8)return;Replace r=(Replace)op;if(r.file==null)return;
-                if(command==6){log.record("RAW_FILE_DATA_OBSERVED","bytes="+body.length+" no_ack_or_completion_inference=true");return;}owned=true;fileStage=r.file.stateLabel();
+                if(command==6&&!r.direct()){log.record("RAW_FILE_DATA_OBSERVED","bytes="+body.length+" no_ack_or_completion_inference=true");return;}owned=true;fileStage=r.file.stateLabel();
                 if(command==2)log.record("FILE_INFO_RESPONSE","stage="+fileStage+" bytes="+(body==null?0:body.length)+" "+r.file.infoReplyObservation(body));
                 for(FileTransfer.Outgoing out:r.file.onPacket(command,body,true))connection.sendFile(out.command,out.body(),out.encrypt);
-                if(command==3){List<TlvView.Part> hashFields=TlvView.decode(body);log.record("FILE_HASH_REQUEST","file_id="+r.file.fileId()+" check_mode="+Wire.number(hashFields,2)+" missing_not_defaulted_to_three=true");}
+                if(command==2&&r.direct()&&r.file.existingResource()){
+                    log.record("DIRECT_METADATA_EXISTS","skip_data_upload=true reference=wrist_native one_post_only=true");
+                    startConfirmationWait(r);actDirect(r,r.directState.existingResource());
+                }
+                if(command==3){List<TlvView.Part> hashFields=TlvView.decode(body);log.record("FILE_HASH_REQUEST","file_id="+r.file.fileId()+" check_mode="+(r.direct()?"observed_not_gated":Wire.number(hashFields,2))+" full_hash_for_wrist_direct="+r.direct());}
                 if(command==7&&r.file.resultObserved()){
                     r.fileResultSeen=true;
                     Integer raw=r.file.peerResultRaw();String failure=r.file.completionFailure();
                     log.record("FILE_RESULT_OBSERVED","file_id="+r.file.fileId()+" raw="+raw+" completion_failure="+failure+" ack_dispatched_first=true transfer_only=true");
-                    if(raw!=null&&raw==0)r.state.nativeResult(0);
+                    if(r.direct()){
+                        if(failure!=null)throw new Core.Fault(failure);
+                        startConfirmationWait(r);actDirect(r,r.directState.nativeResult(raw));
+                    }else if(raw!=null&&raw==0){r.state.nativeResult(0);}
                     else if(failure!=null)throw new Core.Fault(failure);
-                    else if(raw!=null)r.state.nativeResult(raw);
+                    else if(raw!=null){startConfirmationWait(r);r.state.nativeResult(raw);}
                 }
                 show(r);finish(r);return;
             }
@@ -425,19 +474,39 @@ public final class WatchfaceManager {
             if(command==2)owned=query!=null&&query.epoch==epoch&&query.op==op&&op!=null;
             List<TlvView.Part> fields=TlvView.decode(body);observedFields=fields;
             if(command==1){Long w=Wire.number(fields,2),h=Wire.number(fields,3),cap=Wire.number(fields,0x11);if(listener!=null)listener.onParameters(w==null?null:w.intValue(),h==null?null:h.intValue(),cap);return;}
-            if(command==2){handleList(fields,epoch);return;}
+            if(command==2){
+                Query pendingQuery=query;
+                log.record("LIST_RESPONSE_OBSERVED","bytes="+(body==null?0:body.length)+" tags="+TlvView.tags(fields)+
+                        " owned_query="+(pendingQuery!=null&&pendingQuery.epoch==epoch));
+                handleList(fields,epoch);return;
+            }
             if(command==6){handleNames(WireNames.parseResponse(fields),epoch,body.length);return;}
             String id=Wire.text(fields,1),version=Wire.text(fields,2);owned=op!=null&&op.matches(id,version);
-            Long error=Wire.number(fields,0x7f),value=Wire.number(fields,command==3?4:3);
+            boolean directReply=op instanceof Replace&&((Replace)op).direct();
+            if(directReply&&command==3&&((Replace)op).directState.postIssued&&(id==null||id.equals(op.id))&&(version==null||version.equals(op.version)))owned=true;
+            Long error=directReply?wristOperationError(fields):Wire.number(fields,0x7f);
+            Long value=directReply?(command==3?directNeedObservation(fields):wristReportType(fields)):Wire.number(fields,command==3?4:3);
             if(!owned){late(id,version,command,error,value,fields,epoch);return;}
-            if(command==5&&value!=null&&value>Integer.MAX_VALUE)throw new Core.Fault("REPORT_VALUE_OVERFLOW");
-            if(command==5&&(error==null||error==100000))connection.sendControl(0x27,5,concat(Core.tlv(1,id.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(2,version.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(0x7f,num(100000,4))));
+            if(command==5&&!directReply&&value!=null&&value>Integer.MAX_VALUE)throw new Core.Fault("REPORT_VALUE_OVERFLOW");
+            if(command==5&&(directReply||error==null||error==100000))connection.sendControl(0x27,5,concat(Core.tlv(1,id.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(2,version.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(0x7f,num(100000,4))));
             if(op instanceof Replace){
                 Replace r=(Replace)op;
-                // 替换流程不将 27/03 的 03 字段作为必需操作回显。
-                ReplacementState.Action action=command==3?r.state.operation(error,value):r.state.report(value==null?null:value.intValue(),error);
-                log.record(command==3?"OPERATION_RESPONSE":"WATCH_REPORT","id="+id+" version="+version+" error="+error+" value="+value+" "+r.state.summary());
-                actReplace(r,action);show(r);finish(r);
+                if(r.direct()){
+                    if(command==3){
+                        Long echo=Wire.number(fields,3);
+                        log.record("DIRECT_OPERATION_RESPONSE","bytes="+(body==null?0:body.length)+" tags="+TlvView.tags(fields)+
+                                " echo="+echo+" error="+error+" need="+value+" post_issued="+r.directState.postIssued+
+                                " missing_error_uses_official_zero="+(error==null));
+                        if(echo!=null&&echo!=1)return;
+                    }
+                    DirectInstallState.Action action=command==3?r.directState.operation(error,value):r.directState.report(value==null?null:value.intValue(),error);
+                    actDirect(r,action);
+                }else{
+                    ReplacementState.Action action=command==3?r.state.operation(error,value):r.state.report(value==null?null:value.intValue(),error);
+                    actReplace(r,action);
+                }
+                log.record(command==3?"OPERATION_RESPONSE":"WATCH_REPORT","id="+id+" version="+version+" error="+error+" value="+value+" "+(r.direct()?r.directState.summary():r.state.summary()));
+                show(r);finish(r);
             }else if(op instanceof Delete){
                 Delete d=(Delete)op;DeletionState.Action action;
                 if(command==3){Long echo=Wire.number(fields,3);if(echo!=null&&echo!=2)return;action=d.state.operation(error,value,echo);}
@@ -465,14 +534,24 @@ public final class WatchfaceManager {
         }
     }
     private void handleList(List<TlvView.Part> fields,long epoch)throws IOException{
-        Query q=query;if(q==null||q.epoch!=epoch)return;List<TlvView.Face> faces=Wire.faces(fields);Long err=Wire.number(fields,0x7f);
+        Query q=query;if(q==null||q.epoch!=epoch)return;Long err=Wire.number(fields,0x7f);
         if(err!=null&&err!=0&&err!=100000)throw new Core.Fault("DEVICE_LIST_ERROR");
+        Wire.FaceListObservation parsed=Wire.observeFaces(fields);List<TlvView.Face> faces=parsed.faces;
         cancelNames();query=null;latest=faces;listAt=SystemClock.elapsedRealtime();listEpoch=epoch;
         Set<String> listedKeys=new HashSet<>();for(TlvView.Face f:faces)listedKeys.add(f.id+"_"+f.version);
         names.keySet().retainAll(listedKeys);
         publishFaces();expireObservation(faces,listAt,epoch);
-        log.record("RESOURCE_LIST","entries="+faces.size()+" serial="+q.serial+" generation="+q.generation);
+        log.record("RESOURCE_LIST","entries="+faces.size()+" serial="+q.serial+" generation="+q.generation+
+                " complete="+parsed.complete()+" incomplete_entries="+parsed.incompleteEntries.size());
         for(TlvView.Face f:faces)log.record("LIST_ENTRY","id="+f.id+" version="+f.version+" type="+f.type+" expand="+f.expandType);
+        if(!parsed.complete()){
+            // 官方两条客户端路径都容忍单条缺字段：腕连跳过空 ID、缺版本按 ID 索引；Health 逐标签赋值不设必需门。
+            // 因此缺失行只被排除在操作目标之外，不再让整包列表失效、也不再反复弹错误提示。
+            for(Wire.IncompleteFace entry:parsed.incompleteEntries)log.record("LIST_ENTRY_INCOMPLETE",entry.summary()+" excluded_from_targets=true no_guessed_key=true");
+            log.record("LIST_INCOMPLETE","valid_entries="+faces.size()+" incomplete_entries="+parsed.incompleteEntries.size()+
+                    " known_rows_usable=true isolated_entries_never_targets=true connection_preserved=true");
+        }
+        observeCompletedDirectList(parsed,epoch);
         if(q.preparation!=null&&preDelete==q.preparation){
             PreDelete p=q.preparation;preDelete=null;
             try{
@@ -484,8 +563,9 @@ public final class WatchfaceManager {
             }catch(IOException e){preparationFailed(p,Core.code(e),false);throw e;}
         }
         if(q.op!=null&&q.op==active){Op op=q.op;if(op instanceof Replace){
-            Replace r=(Replace)op;r.state.list(faces,q.generation,true);show(r);finish(r);
-            if(active==r&&r.state.postObserved)connection.delay(()->{if(active==r)try{requestList(r);}catch(IOException e){failActive(Core.code(e),null);}},q.generation<r.state.postGeneration?1:1500);
+            Replace r=(Replace)op;if(r.direct())r.directState.list(faces,q.generation,true);else r.state.list(faces,q.generation,true);show(r);finish(r);
+            boolean postObserved=r.direct()?r.directState.postObserved:r.state.postObserved;
+            if(active==r&&postObserved)connection.delay(()->{if(active==r)try{requestList(r);}catch(IOException e){failActive(Core.code(e),null);}},q.generation<(r.direct()?r.directState.postGeneration:r.state.postGeneration)?1:1500);
         }else if(op instanceof Delete){
             Delete d=(Delete)op;Set<String> ids=new HashSet<>();for(TlvView.Face f:faces)ids.add(f.id);
             if(ids.containsAll(d.otherIds))d.state.list(faces,q.generation,true,q.serial);else{d.state.consecutiveAbsences=0;d.state.reason="DELETE_NON_TARGET_LIST_INCOMPLETE";}
@@ -496,6 +576,19 @@ public final class WatchfaceManager {
             if(active==a)connection.delay(()->{if(active==a)try{requestList(a);}catch(IOException e){failActive(Core.code(e),null);}},1500);
         }}
         if(active==null)requestNames();
+    }
+    private void observeCompletedDirectList(Wire.FaceListObservation parsed,long epoch){
+        if(!(last instanceof Replace))return;Replace r=(Replace)last;
+        if(!r.direct()||r.finished==0||r.directState.phase!=DirectInstallState.Phase.COMPLETED)return;
+        if(r.epoch!=epoch){log.record("DIRECT_LIST_OBSERVATION_SKIPPED","reason=epoch_changed no_cross_connection_verdict=true");return;}
+        int exact=0,idOnly=0,incompleteId=0;boolean current=false;
+        for(TlvView.Face f:parsed.faces)if(r.id.equals(f.id)){idOnly++;if(r.version.equals(f.version)){exact++;current|=FacePolicy.current(f);}}
+        for(Wire.IncompleteFace f:parsed.incompleteEntries)if(r.id.equals(f.observedId))incompleteId++;
+        log.record("DIRECT_LIST_OBSERVATION","id="+r.id+" version="+r.version+" complete="+parsed.complete()+" exact_rows="+exact+" complete_id_rows="+idOnly+" incomplete_id_rows="+incompleteId+" current_bit_observed="+(exact==1&&current)+" snapshot_only=true wire_nonce_verified=false application_unverified=true no_query_issued=true no_reupload=true");
+    }
+    private static String payloadKind(HwtSource.Snapshot source){
+        return source.mode==HwtSource.Mode.CONTAINER?"watchface_container":
+                source.mode==HwtSource.Mode.CONTAINER_NO_BIN?"watchface_container_without_bin":"parsed_bin";
     }
     private void cancelNames(){NamesRun run=namesRun;namesRun=null;if(run!=null)run.state.cancel();}
     private void requestNames(){try{
@@ -513,7 +606,9 @@ public final class WatchfaceManager {
             log.record("NAMES_BATCH_QUERY","serial="+batch.serial+" ids="+batch.ids.size()+" list_entries="+run.sourceFaces.size()+" local_not_wire_nonce=true");
             connection.delay(()->{
                 if(namesRun==run&&run.epoch==connection.epoch()&&run.sourceFaces==latest&&run.state.current()==batch&&run.state.expire(SystemClock.elapsedRealtime())){
-                    log.record("NAMES_BATCH_TIMEOUT","serial="+batch.serial+" ids="+batch.ids.size()+" names_retained=true");advanceNames(run);
+                    // 整条查询完全没有回包才走到这里；有回包（哪怕只含部分名字）已在 accept 里结束批次。
+                    log.record("NAMES_BATCH_TIMEOUT","serial="+batch.serial+" ids="+batch.ids.size()+" names_retained=true no_requery=true");
+                    advanceNames(run);
                 }
             },NameQueryState.REPLY_TIMEOUT_MS);
         }catch(IOException e){
@@ -525,8 +620,36 @@ public final class WatchfaceManager {
         if(run==null||run.epoch!=epoch||run.sourceFaces!=latest){log.record("NAMES_REPLY_IGNORED","bytes="+bytes+" current_owner=false");return;}
         Map<String,String> found=run.state.accept(response);int added=0;
         for(TlvView.Face face:latest){String name=found.get(face.id);if(name!=null&&names.putIfAbsent(face.id+"_"+face.version,Core.clean(name))==null)added++;}
-        log.record("NAMES_BATCH_RESPONSE","received_ids="+response.ids.size()+" matched_names="+added+" malformed_names_skipped="+response.malformedNameCount+" bytes="+bytes+" names_only=true");
+        log.record("NAMES_BATCH_RESPONSE","received_ids="+response.ids.size()+" matched_names="+added+" unanswered_ids="+run.state.unanswered()+" malformed_names_skipped="+response.malformedNameCount+" bytes="+bytes+" names_only=true no_requery=true");
         publishFaces();advanceNames(run);
+    }
+    /** Wrist n.f: absent or shorter than four bytes means default error 0. */
+    private static Long wristOperationError(List<TlvView.Part> fields)throws IOException{
+        TlvView.Part p=Wire.unique(fields,0x7f);
+        return p==null||p.value.length<4?null:Long.valueOf(wristInt(p.value));
+    }
+    /** Wrist n.d(3,0): absent/empty means 0, 1..3 bytes unsigned, >=4 signed first four. */
+    private static Long wristReportType(List<TlvView.Part> fields)throws IOException{
+        TlvView.Part p=Wire.unique(fields,3);
+        return Long.valueOf(p==null||p.value.length==0?0:wristInt(p.value));
+    }
+    private static long wristInt(byte[] bytes){
+        int value=0;for(int i=0;i<Math.min(bytes.length,4);i++)value=(value<<8)|(bytes[i]&255);
+        return value;
+    }
+    private static Long directNeedObservation(List<TlvView.Part> fields)throws IOException{
+        TlvView.Part p=Wire.unique(fields,4);
+        return p==null||p.value.length==0||p.value.length>8?null:Core.number(p.value);
+    }
+    private void startConfirmationWait(Replace r){
+        if(r.confirmationWait.started())return;
+        r.confirmationWait.start(SystemClock.elapsedRealtime());
+        log.record("CONFIRMATION_WAIT_STARTED","kind="+kind(r)+" timeout_ms="+ConfirmationWait.TIMEOUT_MS+" report_and_application_shared_deadline=true no_reset_on_reply=true");
+    }
+    private void actDirect(Replace r,DirectInstallState.Action action)throws IOException{
+        if(active!=r||r.epoch!=connection.epoch())return;
+        if(action==DirectInstallState.Action.ACTIVATE){startConfirmationWait(r);r.postAt=SystemClock.elapsedRealtime();connection.sendControl(0x27,3,Wire.operation(r.id,r.version));}
+        else if(action==DirectInstallState.Action.QUERY)requestList(r);
     }
     private void actReplace(Replace r,ReplacementState.Action action)throws IOException{
         if(active!=r||r.epoch!=connection.epoch())return;
@@ -535,46 +658,72 @@ public final class WatchfaceManager {
             log.record("UPLOAD_START","id="+r.id+" version="+r.version+" bytes="+r.source.size+" sha256="+r.source.hash+" file_type=1 upload_budget=1");
             connection.sendFile(2,r.file.metadataBody(),true);
         }else if(action==ReplacementState.Action.ACTIVATE){
-            r.postAt=SystemClock.elapsedRealtime();log.record("POST_UPLOAD_ACTIVATION","id="+r.id+" version="+r.version+" report_two_drives_post=true file_result_is_separate=true post_timeout_ms="+POST_TIMEOUT);
+            startConfirmationWait(r);r.postAt=SystemClock.elapsedRealtime();log.record("POST_UPLOAD_ACTIVATION","id="+r.id+" version="+r.version+" report_two_drives_post=true file_result_is_separate=true post_timeout_ms="+ConfirmationWait.TIMEOUT_MS);
             connection.sendControl(0x27,3,Wire.operation(r.id,r.version));
         }else if(action==ReplacementState.Action.QUERY)requestList(r);
     }
-    private static String kind(Op op){return op instanceof Replace?"replacement":op instanceof Delete?"deletion":"activation";}
-    private static String phase(Op op){return op instanceof Replace?((Replace)op).state.phase.name():op instanceof Delete?((Delete)op).state.phase.name():((Activate)op).state.phase.name();}
-    private static boolean terminal(Op op){return op instanceof Replace?((Replace)op).state.terminal():op instanceof Delete?((Delete)op).state.terminal():((Activate)op).state.terminal();}
+    private static String kind(Op op){return op instanceof Replace?(((Replace)op).direct()?"direct_install":"replacement"):op instanceof Delete?"deletion":"activation";}
+    private static String phase(Op op){return op instanceof Replace?(((Replace)op).direct()?((Replace)op).directState.phase.name():((Replace)op).state.phase.name()):op instanceof Delete?((Delete)op).state.phase.name():((Activate)op).state.phase.name();}
+    private static boolean terminal(Op op){return op instanceof Replace?(((Replace)op).direct()?((Replace)op).directState.terminal():((Replace)op).state.terminal()):op instanceof Delete?((Delete)op).state.terminal():((Activate)op).state.terminal();}
     private void timer(Op op){connection.delay(()->{
         if(active!=op||op.epoch!=connection.epoch())return;long now=SystemClock.elapsedRealtime(),age=now-op.started;
-        boolean initialExpired=op instanceof Replace&&replacementResponseTimedOut(((Replace)op).state.phase,age);
+        boolean initialExpired=op instanceof Replace&&!((Replace)op).direct()&&replacementResponseTimedOut(((Replace)op).state.phase,age);
         boolean activationExpired=op instanceof Activate&&(age>=ACTIVATION_TOTAL_TIMEOUT||
             (((Activate)op).state.phase==ActivationState.Phase.WAIT_OPERATION&&age>=ACTIVATION_OPERATION_TIMEOUT)||
             (((Activate)op).acceptedAt>=0&&now-((Activate)op).acceptedAt>=ACTIVATION_LIST_TIMEOUT));
-        boolean timed=initialExpired||activationExpired||(!(op instanceof Activate)&&age>(op instanceof Delete?POST_TIMEOUT:TOTAL_TIMEOUT))||(op instanceof Replace&&((Replace)op).postAt!=0&&now-((Replace)op).postAt>POST_TIMEOUT)||(op instanceof Delete&&((Delete)op).state.phase==DeletionState.Phase.WAIT_DEVICE&&age>DELETE_OPERATION_TIMEOUT);
+        boolean confirmationExpired=op instanceof Replace&&((Replace)op).confirmationWait.expired(now);
+        boolean timed=initialExpired||activationExpired||(!(op instanceof Activate)&&age>(op instanceof Delete?POST_TIMEOUT:TOTAL_TIMEOUT))||confirmationExpired||(op instanceof Delete&&((Delete)op).state.phase==DeletionState.Phase.WAIT_DEVICE&&age>DELETE_OPERATION_TIMEOUT);
         if(timed){
-            log.record("WATCHFACE_TIMEOUT","kind="+kind(op)+" phase="+phase(op)+" age_ms="+age+" initial_acceptance_timeout="+initialExpired+" initial_limit_ms="+REPLACEMENT_OPERATION_TIMEOUT);
-            if(op instanceof Delete)((Delete)op).state.timeout();else if(op instanceof Replace)((Replace)op).state.timeout();else((Activate)op).state.timeout();finish(op);return;
+            log.record("WATCHFACE_TIMEOUT","kind="+kind(op)+" phase="+phase(op)+" age_ms="+age+" initial_acceptance_timeout="+initialExpired+" initial_limit_ms="+REPLACEMENT_OPERATION_TIMEOUT+" confirmation_timeout="+confirmationExpired+" confirmation_limit_ms="+ConfirmationWait.TIMEOUT_MS+" confirmation_elapsed_ms="+(op instanceof Replace?((Replace)op).confirmationWait.elapsed(now):0));
+            if(op instanceof Delete)((Delete)op).state.timeout();else if(op instanceof Replace){if(((Replace)op).direct())((Replace)op).directState.timeout();else((Replace)op).state.timeout();}else((Activate)op).state.timeout();finish(op);return;
         }timer(op);
     },1000);}
-    private void failActive(String reason,Long err){Op op=active;if(op==null)return;if(op instanceof Replace)((Replace)op).state.fail(reason,err);else if(op instanceof Delete)((Delete)op).state.fail(reason,err);else((Activate)op).state.fail(reason,err);finish(op);}
+    private void failActive(String reason,Long err){Op op=active;if(op==null)return;if(op instanceof Replace){if(((Replace)op).direct())((Replace)op).directState.fail(reason,err);else((Replace)op).state.fail(reason,err);}else if(op instanceof Delete)((Delete)op).state.fail(reason,err);else((Activate)op).state.fail(reason,err);finish(op);}
     private void finish(Op op){
         if(active!=op||!terminal(op))return;
-        boolean resultSettled=op instanceof Replace&&((Replace)op).fileResultSeen;
+        boolean resultSettled=op instanceof Replace&&(((Replace)op).fileResultSeen||(((Replace)op).direct()&&((Replace)op).file!=null&&((Replace)op).file.existingResource()));
         show(op);op.finished=SystemClock.elapsedRealtime();active=null;busy=false;query=null;
         if(op instanceof Replace&&((Replace)op).file!=null)try{((Replace)op).file.close();}catch(Exception ignored){}
-        boolean ok=op instanceof Replace?(((Replace)op).state.phase==ReplacementState.Phase.LISTED||((Replace)op).state.phase==ReplacementState.Phase.NO_TRANSFER):op instanceof Delete?((Delete)op).state.phase==DeletionState.Phase.DELETED:((Activate)op).state.phase==ActivationState.Phase.ACTIVATED;
-        log.record(op instanceof Replace?"REPLACE_SUMMARY":op instanceof Delete?"DELETE_SUMMARY":"ACTIVATE_SUMMARY","id="+op.id+" version="+op.version+" reliable_protocol_end="+ok+" visual_application_unverified=true"+(op instanceof Replace?" "+((Replace)op).state.summary():""));
+        boolean ok=op instanceof Replace?(((Replace)op).direct()?((Replace)op).directState.phase==DirectInstallState.Phase.COMPLETED:(((Replace)op).state.phase==ReplacementState.Phase.LISTED||((Replace)op).state.phase==ReplacementState.Phase.NO_TRANSFER)):op instanceof Delete?((Delete)op).state.phase==DeletionState.Phase.DELETED:((Activate)op).state.phase==ActivationState.Phase.ACTIVATED;
+        log.record(op instanceof Replace?"REPLACE_SUMMARY":op instanceof Delete?"DELETE_SUMMARY":"ACTIVATE_SUMMARY","id="+op.id+" version="+op.version+" reliable_protocol_end="+ok+" visual_application_unverified=true"+(op instanceof Replace?" "+(((Replace)op).direct()?((Replace)op).directState.summary():((Replace)op).state.summary()):""));
+        Replace refused=op instanceof Replace?(Replace)op:null;
+        long refusal=refused!=null&&refused.file!=null?refused.file.infoRefusal():0;
         if(!ok&&op.epoch==connection.epoch()){
-            listAt=0;reconnectEpoch=op.epoch;
-            if(!resultSettled)connection.protocolFailure("WATCHFACE_OPERATION_UNCERTAIN_RECONNECT");
-            else log.record("FILE_RESULT_RECONNECT_REQUIRED","ack_queue_preserved=true no_more_operation_until_new_authenticated_epoch=true");
+            listAt=0;
+            if(DeviceRefusal.known(refusal)){
+                // 设备在文件登记阶段就给出明确容量/数量拒绝，且一个数据字节都没发：这是终局失败，
+                // 不是协议歧义。保留已认证链路，只让旧列表失效，用户清出空间后可直接再试。
+                log.record("DEVICE_FILE_REFUSED","code="+refusal+" reason="+DeviceRefusal.reason(refusal)+" stage=file_info link_preserved=true reconnect_required=false fresh_list_required=true retry_after_refresh=true no_data_sent=true no_retry_sent=true no_reupload=true");
+            }else{
+                reconnectEpoch=op.epoch;
+                if(!resultSettled)connection.protocolFailure("WATCHFACE_OPERATION_UNCERTAIN_RECONNECT");
+                else log.record("FILE_RESULT_RECONNECT_REQUIRED","ack_queue_preserved=true no_more_operation_until_new_authenticated_epoch=true");
+            }
         }
-        publishFaces();if(ok)requestNames();
+        boolean directEnd=op instanceof Replace&&((Replace)op).direct();
+        if(directEnd&&ok){
+            listAt=0;
+            Replace r=(Replace)op;
+            log.record("DIRECT_NATIVE_END","id="+r.id+" version="+r.version+" uploaded_payload_bytes="+r.source.size+" uploaded_payload_sha256="+r.source.hash+" payload_kind="+payloadKind(r.source)+" bin_removed="+(r.source.mode==HwtSource.Mode.CONTAINER_NO_BIN)+
+                    (r.source.mode==HwtSource.Mode.BIN?" uploaded_bin_bytes="+r.source.size+" uploaded_bin_sha256="+r.source.hash:"")+" payload_mode="+r.source.mode+" post_need="+r.directState.postNeed+" reference=wrist_native client_flow_completed=true device_application_unverified=true need_not_a_gate=true fresh_list_not_required=true no_reupload=true");
+        }
+        publishFaces();if(ok&&!directEnd)requestNames();
     }
     private void show(Op op){if(listener==null||summaryOwner!=owner(op))return;if(op instanceof Replace){
         Replace r=(Replace)op;shownReplacementRequest=r.request;shownDeletionRequest=null;shownActivationRequest=null;Integer progress=r.file==null?null:(int)Math.min(100,r.file.bytesSentOrPrepared()*100/r.file.totalSize());
-        listener.onReplacementOperation(r.request.identity,r.state.phase.name(),r.state.summary(),progress,!r.state.terminal(),r.state.phase==ReplacementState.Phase.FAILED||r.state.phase==ReplacementState.Phase.TIMED_OUT||r.state.phase==ReplacementState.Phase.CANCELLED);
+        String detail=r.direct()?r.directState.summary():r.state.summary();String currentPhase=r.direct()?r.directState.phase.name():r.state.phase.name();boolean done=r.direct()?r.directState.terminal():r.state.terminal();boolean failed=r.direct()?(r.directState.phase==DirectInstallState.Phase.FAILED||r.directState.phase==DirectInstallState.Phase.TIMED_OUT||r.directState.phase==DirectInstallState.Phase.CANCELLED):(r.state.phase==ReplacementState.Phase.FAILED||r.state.phase==ReplacementState.Phase.TIMED_OUT||r.state.phase==ReplacementState.Phase.CANCELLED);
+        listener.onReplacementOperation(r.request.identity,currentPhase,detail,progress,!done,failed);
     }else if(op instanceof Delete){shownReplacementRequest=null;shownActivationRequest=null;Delete d=(Delete)op;shownDeletionRequest=d.request;listener.onDeletionOperation(d.request.identity,d.state.phase.name(),d.state.summary(),null,!d.state.terminal(),d.state.phase==DeletionState.Phase.FAILED||d.state.phase==DeletionState.Phase.TIMED_OUT);
     }else{shownReplacementRequest=null;shownDeletionRequest=null;Activate a=(Activate)op;shownActivationRequest=a.request;listener.onActivationOperation(a.request.identity,a.state.phase.name(),a.state.summary(),!a.state.terminal(),a.state.phase==ActivationState.Phase.FAILED||a.state.phase==ActivationState.Phase.TIMED_OUT);}}
     private void late(String id,String version,int command,Long error,Long value,List<TlvView.Part> fields,long epoch)throws IOException{
+        for(Op prior:history)if(prior instanceof Replace&&((Replace)prior).direct()&&prior!=active&&prior.epoch==epoch&&prior.matches(id,version)&&prior.finished!=0&&SystemClock.elapsedRealtime()-prior.finished<POST_TIMEOUT){
+            if(command==5){
+                connection.sendControl(0x27,5,concat(Core.tlv(1,id.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(2,version.getBytes(java.nio.charset.StandardCharsets.UTF_8)),Core.tlv(0x7f,num(100000,4))));
+                log.record("DIRECT_LATE_REPORT","ack_only=true no_new_post=true no_reupload=true reference=wrist_native");return;
+            }
+            if(command==3){error=wristOperationError(fields);if(error==null||error==0||error==100000)return;}
+            break;
+        }
         boolean badError=error!=null&&error!=0&&(command!=5||error!=100000),reportThree=command==5&&value!=null&&value==3;
         boolean invalidActivationReceipt=command==3&&(error==null||value==null||value.longValue()!=0);
         if(!badError&&!reportThree&&!invalidActivationReceipt)return;
@@ -587,14 +736,24 @@ public final class WatchfaceManager {
                 ((Delete)old).state.fail("LATE_DEVICE_ERROR",error);
             }else if(old instanceof Replace){
                 if(!badError&&!reportThree)continue;
-                ((Replace)old).state.fail(reportThree?"LATE_WATCH_REPORT_FAILURE":"LATE_DEVICE_ERROR",error);
+                Replace lateReplace=(Replace)old;
+                if(lateReplace.direct()){
+                    if(command==3){Long echo=Wire.number(fields,3);if(echo!=null&&echo!=1)continue;}
+                    lateReplace.directState.fail(reportThree?"LATE_WATCH_REPORT_FAILURE":"LATE_DEVICE_ERROR",error);
+                }else lateReplace.state.fail(reportThree?"LATE_WATCH_REPORT_FAILURE":"LATE_DEVICE_ERROR",error);
             }else{
                 Activate oldActivation=(Activate)old;
                 if(command==3){Long echo=Wire.number(fields,3);if(echo!=null&&echo!=1)continue;oldActivation.state.operation(error,value,echo);}
                 else oldActivation.state.report(value==null?null:value.intValue(),error);
             }
             log.record("LATE_ERROR","id="+id+" version="+version+" report_three="+reportThree+" no_retry_no_ack_no_stop=true");
-            if(active==null&&last==old&&summaryOwner==owner(old)){show(old);if(!(old instanceof Replace))connection.protocolFailure("LATE_OPERATION_ERROR_RECONNECT");}
+            if(active==null&&last==old&&summaryOwner==owner(old)){
+                show(old);
+                if(old instanceof Replace&&((Replace)old).direct()){
+                    listAt=0;reconnectEpoch=old.epoch;publishFaces();
+                    log.record("DIRECT_LATE_RESULT_INVALIDATED","reconnect_required=true no_tx_no_retry_no_delete=true");
+                }else if(!(old instanceof Replace))connection.protocolFailure("LATE_OPERATION_ERROR_RECONNECT");
+            }
             return;
         }
     }

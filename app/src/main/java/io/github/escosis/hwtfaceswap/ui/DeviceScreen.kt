@@ -422,6 +422,13 @@ internal fun DeviceScreen(
                         }
                     }
                 },
+                onRebind = {
+                    val current = latestState
+                    if (callbackOwner.get() && current.connectionEpoch == state.connectionEpoch &&
+                        current.selectedDeviceAddress == state.selectedDeviceAddress && !current.connected && !current.connecting &&
+                        canShowDeviceWindow(current) && !current.unpairing && !current.scanning
+                    ) latestActions.rebindNow()
+                },
                 onDisabledHint = { control -> showTopControlHint(control, state, topControlsEpoch) },
                 onOpenFaces = {
                     val current = latestState
@@ -462,6 +469,11 @@ internal fun DeviceScreen(
                             ActionButton("重新检查", onClick = {
                                 if (callbackOwner.get() && latestState.unpairing && !latestState.unpairWorking && latestState.unpairAddress == state.unpairAddress && latestState.unpairToken == state.unpairToken) latestActions.retryUnpair()
                             }, modifier = Modifier.weight(1f), enabled = !state.unpairWorking)
+                            if (state.unpairCancelable) {
+                                ActionButton("取消解除配对", onClick = {
+                                    if (callbackOwner.get() && latestState.unpairing && !latestState.unpairWorking && latestState.unpairCancelable && latestState.unpairToken == state.unpairToken) latestActions.cancelUnpair()
+                                }, modifier = Modifier.weight(1f), enabled = !state.unpairWorking)
+                            }
                         }
                     }
                 }
@@ -625,6 +637,7 @@ private fun SelectedWatchCard(
     onConnect: () -> Unit,
     onConfigureId: () -> Unit,
     onUnpair: () -> Unit,
+    onRebind: () -> Unit,
     onDisabledHint: (DeviceControl) -> Unit,
     onOpenFaces: () -> Unit,
     onDisconnect: () -> Unit,
@@ -705,14 +718,37 @@ private fun SelectedWatchCard(
             disabledHint = disabledHint(DeviceControl.CONFIGURE_ID),
         )
         Spacer(Modifier.height(10.dp))
-        ActionButton(
-            text = "解除配对",
-            onClick = { invokeControl(DeviceControl.UNPAIR, onUnpair) },
-            modifier = Modifier.fillMaxWidth(),
-            destructive = true,
-            enabled = DeviceControlsPolicy.enabled(state, DeviceControl.UNPAIR),
-            disabledHint = disabledHint(DeviceControl.UNPAIR),
-        )
+        val context = LocalContext.current
+        val rebindEnabled = selectedAddress != null && !state.connected && !state.connecting &&
+            !state.unpairing && !state.scanning && !state.quarantine && canShowDeviceWindow(state)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ActionButton(
+                text = "重新协议绑定",
+                onClick = {
+                    if (controlsOwner.get() && DeviceControlsPolicy.frameMatches(state, latestState) &&
+                        !latestState.connected && !latestState.connecting && !latestState.unpairing
+                    ) onRebind()
+                },
+                modifier = Modifier.weight(1f),
+                destructive = true,
+                enabled = rebindEnabled,
+                disabledHint = if (state.connected || state.connecting) ({
+                    if (controlsOwner.get() && DeviceControlsPolicy.frameMatches(state, latestState) &&
+                        canShowDeviceWindow(latestState) && (latestState.connected || latestState.connecting)
+                    ) Toast.makeText(context, "请先断开或取消连接，再重新协议绑定", Toast.LENGTH_SHORT).show()
+                }) else null,
+            )
+            ActionButton(
+                text = "解除配对",
+                onClick = { invokeControl(DeviceControl.UNPAIR, onUnpair) },
+                modifier = Modifier.weight(1f),
+                destructive = true,
+                enabled = DeviceControlsPolicy.enabled(state, DeviceControl.UNPAIR),
+                disabledHint = disabledHint(DeviceControl.UNPAIR),
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+        MutedText("WATCH 系列切换模式后建议点击重新协议绑定。")
     }
 }
 
@@ -780,6 +816,7 @@ private fun HistoryWatchPreference(device: NearbyWatch, summary: String, enabled
             color = if (enabled) colors.onBackground else colors.disabledOnSecondaryVariant,
             softWrap = true,
         )
+        Spacer(Modifier.height(4.dp))
         Text(text = summary, style = MiuixTheme.textStyles.body2, color = summaryColor)
         Spacer(Modifier.height(8.dp))
         Text(

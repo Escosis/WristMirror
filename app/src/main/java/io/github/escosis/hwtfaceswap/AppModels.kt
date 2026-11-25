@@ -51,6 +51,16 @@ data class SourceInfo(
     val sha256: String,
     val previewPath: String? = null,
     val previewSha256: String? = null,
+    /** 是否已冻结可用于覆盖的经典 BIN；与直装类型选择独立。 */
+    val replacementAvailable: Boolean = true,
+    val payloadKind: String = "bin",
+    /** 只列已成功冻结的直装载荷；检测到但未准备好的类型不能被操作。 */
+    val payloadKinds: List<String> = listOf("bin"),
+    val detectedPayloadKinds: List<String> = payloadKinds,
+    val screen: String = "未提供",
+    val payloadDiagnostic: String = "",
+    /** 同一文件重新导入也更换 UI owner；本地序号不是线上资源或随机数。 */
+    val importToken: Long = 0,
 )
 data class OperationInfo(
     val kind: String = "",
@@ -146,6 +156,8 @@ data class AppUiState(
     val unpairAddress: String? = null,
     val unpairMessage: String = "",
     val unpairNeedsSettings: Boolean = false,
+    /** 只有尚未开始资料清理时才能撤回解除配对。 */
+    val unpairCancelable: Boolean = false,
     val rebindCount: Int = 0,
     val quarantine: Boolean = false,
     val logs: List<String> = emptyList(),
@@ -183,6 +195,10 @@ interface AppActions {
     fun requestUnpair(device: NearbyWatch)
     fun openUnpairSettings()
     fun retryUnpair()
+    /** 撤回尚未开始清理的解除配对标记；一次资料都没有删除。 */
+    fun cancelUnpair() {}
+    /** 用户确认后清除本应用协议密钥并重新绑定；页面常驻入口。 */
+    fun rebindNow() {}
     fun submitPin(expectedEpoch: Long, pin: String)
     fun cancelPin(expectedEpoch: Long)
     fun refreshFaces()
@@ -191,6 +207,9 @@ interface AppActions {
     fun cancelHwtPick()
     fun importHwt(uri: Uri)
     fun requestReplacement()
+    fun requestDirectInstall() {}
+    /** 只切换本次导入可用的载荷类型（经典 BIN / 全能模式容器 / 移除 bin 的派生容器）。 */
+    fun selectPayloadKind(kind: String) {}
     /** 逐卡入口绑定该卡原始观察，不依赖全局选中状态。 */
     fun requestReplacement(face: FaceItem, epoch: Long) {}
     fun requestActivation(face: FaceItem, epoch: Long) {}

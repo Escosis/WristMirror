@@ -81,6 +81,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
             public void clearCredentials(String address)throws Exception{secure.clearDevice(address);}
             public void removeHistory(String address)throws Exception{history.removeDevice(address);}
             public void finish(String address,long token)throws Exception{secure.removals().finish(address,token);}
+            public void abandon(String address,long token)throws Exception{secure.removals().abandon(address,token);}
         });
         connection.setPendingRemovalGuard(address->unpair.blocksAddress(address));
         unpair.addListener(s->{if(s.message!=null&&!s.message.isEmpty())logs.record("SYSTEM_UNPAIR",s.message);});
@@ -101,7 +102,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
     }
     private void installReplacementDialog(WatchfaceManager.ReplacementRequest request,String title,String fileName){
         retireDialogSessions();replacementRequest=request;WatchfaceManager.ReplacementIdentity identity=request.identity;
-        replacementDialog=new ReplacementDialogInfo(identity.token,identity.epoch,identity.id,identity.version,title,fileName,new OperationInfo("replacement","WAIT_OPERATION","正在开始替换",null,true,false),false);
+        replacementDialog=new ReplacementDialogInfo(identity.token,identity.epoch,identity.id,identity.version,title,fileName,new OperationInfo(request.directInstall?"direct_install":"replacement","WAIT_OPERATION",request.directInstall?"正在开始安装":"正在开始替换",null,true,false),false);
         replacementDialogRevision++;
     }
     private void installDeletionDialog(WatchfaceManager.DeletionRequest request,String title){
@@ -129,12 +130,12 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         installDeletionDialog(request,title);publish();return true;
     }
     private boolean ownsReplacementDialog(WatchfaceManager.ReplacementIdentity identity){
-        return identity!=null&&replacementRequest!=null&&replacementRequest.identity==identity&&replacementDialog!=null&&"replacement".equals(replacementDialog.getOperation().getKind())&&replacementDialog.getToken()==identity.token&&replacementDialog.getConnectionEpoch()==identity.epoch&&Objects.equals(replacementDialog.getTargetId(),identity.id)&&Objects.equals(replacementDialog.getTargetVersion(),identity.version);
+        return identity!=null&&replacementRequest!=null&&replacementRequest.identity==identity&&replacementDialog!=null&&(identity.directInstall?"direct_install":"replacement").equals(replacementDialog.getOperation().getKind())&&replacementDialog.getToken()==identity.token&&replacementDialog.getConnectionEpoch()==identity.epoch&&Objects.equals(replacementDialog.getTargetId(),identity.id)&&Objects.equals(replacementDialog.getTargetVersion(),identity.version);
     }
     private void updateReplacementDialog(WatchfaceManager.ReplacementIdentity identity,String stage,String detail,Integer progress,boolean active,boolean failed){
         if(!ownsReplacementDialog(identity))return;
         ReplacementDialogInfo old=replacementDialog;
-        replacementDialog=new ReplacementDialogInfo(old.getToken(),old.getConnectionEpoch(),old.getTargetId(),old.getTargetVersion(),old.getTitle(),old.getFileName(),new OperationInfo("replacement",stage,detail,progress,active,failed),old.getInterruptRequested());
+        replacementDialog=new ReplacementDialogInfo(old.getToken(),old.getConnectionEpoch(),old.getTargetId(),old.getTargetVersion(),old.getTitle(),old.getFileName(),new OperationInfo(identity.directInstall?"direct_install":"replacement",stage,detail,progress,active,failed),old.getInterruptRequested());
         replacementDialogRevision++;
     }
     private boolean ownsDeletionDialog(WatchfaceManager.DeletionIdentity identity){
@@ -252,7 +253,7 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         // 旧回调只能更新仍由 manager 发布的同一摘要；新会话的标题、文件名不从当前选择重建。
         if(!ownsReplacementDialog(identity)&&active&&!activeOperationDialog()&&!retiredDialogTokens.contains(identity.token))installReplacementDialog(current,identity.id,"本地 HWT");
         if(replacementIdentity!=identity)message="";
-        operationRevision++;replacementIdentity=identity;deletionIdentity=null;activationIdentity=null;kind="replacement";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
+        operationRevision++;replacementIdentity=identity;deletionIdentity=null;activationIdentity=null;kind=identity.directInstall?"direct_install":"replacement";this.stage=stage;operationDetail=detail;this.progress=progress;this.active=active;this.failed=failed;
         updateReplacementDialog(identity,stage,detail,progress,active,failed);publish();
     }
     @Override public synchronized void onReplacementRequestFinished(WatchfaceManager.ReplacementIdentity identity,String stage,String detail,boolean failed){
@@ -299,5 +300,11 @@ public final class AppRuntime implements WatchConnection.Listener,WatchfaceManag
         message=error;publish();
     }
     public void onPreparedDeletion(TlvView.Face face,long epoch){if(epoch!=connection.epoch()||!connection.ready())return;for(Observer o:observers)o.deletionPrepared(face,epoch);}
-    public synchronized void onError(String msg){message=msg;publish();}
+    public synchronized void onError(String msg){
+        // 含缺失条目的列表不再作为错误上报（完整行照常可用）；保留旧码的兜底文案，避免任何历史路径把连接问题写错。
+        message="WIRE_FACE_LIST_INCOMPLETE".equals(msg)
+                ? "手表列表有条目缺少版本等必需字段；该条目不会作为操作目标，其他表盘照常可用"
+                : msg;
+        publish();
+    }
 }

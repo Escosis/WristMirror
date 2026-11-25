@@ -17,13 +17,50 @@ public final class RfcommChannel implements LinkChannel {
     private final ExecutorService reader=Executors.newSingleThreadExecutor(),writer=Executors.newSingleThreadExecutor();private final AtomicBoolean closed=new AtomicBoolean(),reported=new AtomicBoolean();
     private volatile BluetoothSocket socket;private volatile OutputStream output;private final AtomicInteger queuedBytes=new AtomicInteger();
     public RfcommChannel(BluetoothAdapter adapter,BluetoothDevice device,long epoch,Listener listener,boolean secure){this.adapter=adapter;this.device=device;this.epoch=epoch;this.listener=listener;this.secure=secure;}
-    @SuppressLint("MissingPermission") public void connect(){reader.execute(()->{try{adapter.cancelDiscovery();BluetoothSocket created=secure?device.createRfcommSocketToServiceRecord(HUAWEI_SDP):device.createInsecureRfcommSocketToServiceRecord(HUAWEI_SDP);socket=created;if(closed.get()){created.close();return;}created.connect();if(closed.get()){created.close();return;}output=created.getOutputStream();listener.onOpen(epoch,device.getName()==null?"华为手表":device.getName());InputStream input=created.getInputStream();byte[] b=new byte[4096];while(!closed.get()){int n=input.read(b);if(n<0)throw new EOFException();if(n>0)listener.onBytes(epoch,Arrays.copyOf(b,n));}}catch(Exception e){fail(e instanceof SecurityException?"BLUETOOTH_PERMISSION_REQUIRED":"RFCOMM_CONNECTION_CLOSED");}});}
+
+    @SuppressLint("MissingPermission") public void connect(){reader.execute(()->{
+        String phase="CANCEL_DISCOVERY";
+        try{
+            adapter.cancelDiscovery();
+            phase="CREATE_SOCKET";
+            BluetoothSocket created=secure?device.createRfcommSocketToServiceRecord(HUAWEI_SDP):device.createInsecureRfcommSocketToServiceRecord(HUAWEI_SDP);
+            socket=created;if(closed.get()){created.close();return;}
+            phase="CONNECT";created.connect();if(closed.get()){created.close();return;}
+            phase="GET_OUTPUT_STREAM";output=created.getOutputStream();
+            phase="GET_INPUT_STREAM";InputStream input=created.getInputStream();
+            phase="GET_DEVICE_NAME";String name=device.getName();
+            phase="OPEN_CALLBACK";listener.onOpen(epoch,name==null?"华为手表":name);
+            phase="READ";byte[] b=new byte[4096];while(!closed.get()){
+                int n=input.read(b);if(n<0){fail(eofDetail(secure));return;}
+                if(n>0)try{listener.onBytes(epoch,Arrays.copyOf(b,n));}catch(RuntimeException e){fail(failureDetail("READ_CALLBACK",secure,e));return;}
+            }
+        }catch(SecurityException e){fail(failureDetail(phase,secure,e));}
+        catch(IOException e){fail(failureDetail(phase,secure,e));}
+        catch(RuntimeException e){fail(failureDetail(phase,secure,e));}
+    });}
+
+    /** Safe metadata only: never include the platform exception message or device identity. */
+    static String failureDetail(String phase,boolean secure,Throwable error){
+        String safePhase=safePhase(phase),exception=error==null?"UnknownException":error.getClass().getSimpleName();
+        if(exception.isEmpty())exception="UnknownException";
+        String common=" phase="+safePhase+" transport=rfcomm_"+(secure?"secure":"insecure")+" sdp_uuid="+HUAWEI_SDP;
+        return error instanceof SecurityException?"BLUETOOTH_PERMISSION_REQUIRED"+common+" exception="+exception:
+                "RFCOMM_"+safePhase+"_FAILED"+common+" exception="+exception;
+    }
+    static String eofDetail(boolean secure){return "RFCOMM_EOF phase=READ transport=rfcomm_"+(secure?"secure":"insecure")+" sdp_uuid="+HUAWEI_SDP;}
+    private static String safePhase(String phase){
+        if("CANCEL_DISCOVERY".equals(phase)||"CREATE_SOCKET".equals(phase)||"CONNECT".equals(phase)||
+                "GET_OUTPUT_STREAM".equals(phase)||"GET_INPUT_STREAM".equals(phase)||"GET_DEVICE_NAME".equals(phase)||
+                "OPEN_CALLBACK".equals(phase)||"READ".equals(phase)||"READ_CALLBACK".equals(phase)||"WRITE".equals(phase))return phase;
+        return "UNKNOWN";
+    }
+
     public void send(List<byte[]> frames,int peerMtu,int intervalMs)throws IOException{
         if(closed.get()||output==null)throw new IOException("TRANSPORT_NOT_READY");if(frames==null||frames.size()>256)throw new IOException("FRAME_QUEUE_LIMIT");
         final List<byte[]> owned=new ArrayList<>();int total=0;for(byte[] f:frames){if(f==null||(total+=f.length)>2*1024*1024)throw new IOException("FRAME_QUEUE_LIMIT");owned.add(f.clone());}
         final int mtu=peerMtu>=16&&peerMtu<=65540?peerMtu:1024,delay=Math.max(0,Math.min(intervalMs,1000));
         final int reservation=total;if(queuedBytes.addAndGet(reservation)>4*1024*1024){queuedBytes.addAndGet(-reservation);throw new IOException("RFCOMM_QUEUE_LIMIT");}
-        try{writer.execute(()->{try{for(byte[] frame:owned){for(int p=0;p<frame.length;p+=mtu){if(closed.get())return;OutputStream out=output;if(out==null)throw new IOException();out.write(frame,p,Math.min(mtu,frame.length-p));out.flush();if(delay>0)Thread.sleep(delay);}}}catch(Exception e){fail("RFCOMM_WRITE_FAILED");}finally{queuedBytes.addAndGet(-reservation);}});}catch(RejectedExecutionException e){queuedBytes.addAndGet(-reservation);throw new IOException("TRANSPORT_CLOSED");}
+        try{writer.execute(()->{try{for(byte[] frame:owned){for(int p=0;p<frame.length;p+=mtu){if(closed.get())return;OutputStream out=output;if(out==null)throw new IOException();out.write(frame,p,Math.min(mtu,frame.length-p));out.flush();if(delay>0)Thread.sleep(delay);}}}catch(Exception e){fail(failureDetail("WRITE",secure,e));}finally{queuedBytes.addAndGet(-reservation);}});}catch(RejectedExecutionException e){queuedBytes.addAndGet(-reservation);throw new IOException("TRANSPORT_CLOSED");}
     }
     private void fail(String why){if(!closed.get()&&reported.compareAndSet(false,true))listener.onFailure(epoch,why);close();}
     public void close(){if(!closed.compareAndSet(false,true))return;BluetoothSocket s=socket;output=null;if(s!=null)try{s.close();}catch(IOException ignored){}reader.shutdownNow();writer.shutdownNow();}

@@ -51,7 +51,9 @@ public final class ActivationState {
             fail("ACTIVATION_OPERATION_ERROR", error);
             return Action.NONE;
         }
-        if (error == null || transferNeed == null) {
+        // 0105 日志：本机 27/03 回包缺 7F。原厂 Health handleApply / 腕连 w0.H 都按 0 初始化；
+        // 原始观测仍为 null，且缺 04 need 仍然拒绝。
+        if (transferNeed == null) {
             fail("ACTIVATION_OPERATION_FIELDS_MISSING", null);
             return Action.NONE;
         }

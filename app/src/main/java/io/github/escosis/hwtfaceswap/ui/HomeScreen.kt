@@ -170,7 +170,7 @@ private fun HomeConnectionStatusCard(state: AppUiState, onOpenStatus: (Int, () -
 private fun homeDeviceName(state: AppUiState): String? {
     // 已连接或正在连接时，只采用连接模型中的真实名称；不从历史推测当前设备。
     if (state.connected || state.connecting) return state.watchName.ifBlank { "未知名称设备" }
-    val address = state.selectedDeviceAddress?.takeIf { it.isNotBlank() } ?: return "当前无历史设备"
+    val address = state.selectedDeviceAddress?.takeIf { it.isNotBlank() } ?: return null
     val selectedName = state.devices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name
         ?: state.savedDevices.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name
     return selectedName?.takeIf { it.isNotBlank() } ?: "未知名称设备"
@@ -250,6 +250,7 @@ private fun homeCopyValue(rendered: AppUiState, current: AppUiState, label: Stri
     return latestValue?.takeIf { it == renderedValue }
 }
 
+/** 输入为腕连归一后的显示等效值，不将其当成设备原始精确字节数。 */
 private fun homeMemoryText(bytes: Long): String {
     val megabytes = bytes / (1024L * 1024L)
     return if (megabytes >= 1024L) {

@@ -144,6 +144,20 @@ public final class DeviceRemovalJournal {
             record.durable=true;
         } catch(RuntimeException e) { throw new Core.Fault("LOCAL_UNPAIR_MARKER_WRITE_FAILED"); }
     }
+    /** 只有尚未开始资料清理时才允许撤回标记：此时凭据/历史一条都没有删除。 */
+    public void abandon(String address,long token)throws IOException {
+        synchronized(LOCK) {
+            Pending record=owned(address,token);
+            if(record.cleanupStarted)throw new Core.Fault("UNPAIR_CLEANUP_STARTED");
+            try {
+                if(!prefs.edit().remove(PENDING+record.address).commit()) {
+                    record.durable=false;throw new Core.Fault("LOCAL_UNPAIR_MARKER_WRITE_FAILED");
+                }
+            } catch(RuntimeException e) { record.durable=false;throw new Core.Fault("LOCAL_UNPAIR_MARKER_WRITE_FAILED"); }
+            registry.pending.remove(record.address);
+            // 保留代次：撤回后旧连接任务的回调仍不能复活资料。
+        }
+    }
     public void finish(String address,long token)throws IOException {
         synchronized(LOCK) {
             Pending record=owned(address,token);
